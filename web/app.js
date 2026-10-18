@@ -1085,6 +1085,8 @@ async function budgetPage() {
     ? await supabase.from("energy_daily").select("day, kwh, cost_pence, metered").eq("home_id", home.id).gte("day", periodStart).order("day")
     : { data: [] };
   const zoneByLocal = Object.fromEntries(zones.map((z) => [z.local_id, z]));
+  // suggestions already applied or declined stay hidden until the next plan
+  if (plan) plan.suggestions = plan.suggestions.filter((s) => !(budget?.declined_suggestions || []).includes(s.key));
 
   render(`<h1>Budget</h1>
     ${budgetCard(budget, plan, false)}
@@ -1166,6 +1168,10 @@ async function budgetPage() {
         p_slots: s.schedule.map((x) => ({ day: x.day, on_time: x.onTime.slice(0, 5), off_time: x.offTime.slice(0, 5), temp: x.temp })),
       });
       if (error) return alert(fail(error));
+      // remember it, so it isn't shown or suggested again this month
+      const handled = (budget.declined_suggestions || []).concat(s.key);
+      await supabase.from("budgets").update({ declined_suggestions: handled }).eq("home_id", home.id);
+      budget.declined_suggestions = handled;
       b.closest(".suggestion").innerHTML = message("success", "Applied. The plan updates within the hour.");
     };
   });
