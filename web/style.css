@@ -223,6 +223,9 @@ td { padding: 10px 8px; border-top: 1px solid var(--border); vertical-align: top
 td.num { font-variant-numeric: tabular-nums; }
 
 .chart-wrap { position: relative; height: 260px; }
+.chart-wrap.short { height: 180px; }
+
+.advice { border-color: var(--accent); }
 
 .code-input { font-size: 22px; letter-spacing: 3px; text-align: center; text-transform: uppercase; }
 

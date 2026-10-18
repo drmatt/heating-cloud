@@ -94,3 +94,48 @@ r = await call("GET", "/rest/v1/commands?id=eq." + cmd.id + "&select=status,payl
 ok(r.body[0].status == "done" && !r.body[0].payload.pass, "password scrubbed, status done");
 r = await call("POST", "/rest/v1/rpc/controller_add_sensor", { p_device: "AAAA", p_name: "Study", p_zone_local_id: 5 }, ctok);
 ok(r.status < 300, "controller adds paired sensor");
+
+// ---------------------------------------------------------------------------
+// Energy saving
+
+r = await call("PATCH", "/rest/v1/zones?id=eq." + zones[0].id, { eco_enabled: true, comfort_margin: 1.5 }, alice, "return=minimal");
+ok(r.status == 204, "alice changes eco settings");
+r = await call("PATCH", "/rest/v1/zones?id=eq." + zones[0].id, { model: { ready: true } }, alice);
+ok(r.status >= 400, "alice can't write the learned model");
+r = await call("PATCH", "/rest/v1/zones?id=eq." + zones[0].id, { comfort_margin: 5 }, alice);
+ok(r.status >= 400, "comfort margin is limited to 0-2");
+r = await call("PATCH", "/rest/v1/homes?id=eq." + home, { latitude: 53.41, longitude: -2.15 }, alice, "return=minimal");
+ok(r.status == 204, "alice sets the location");
+
+const report2 = Object.assign({}, report, { models: [{ local_id: 1, model: { ready: true, k: 0.05, h: 0.7, overshoot: 0.5 } }] });
+r = await call("POST", "/rest/v1/rpc/controller_sync", { p_report: report2 }, ctok);
+const kz = r.body.zones.find((z) => z.local_id == 1);
+ok(r.body.location.latitude == 53.41 && kz.eco_enabled === true && Number(kz.comfort_margin) == 1.5, "controller gets location and eco settings");
+r = await call("GET", "/rest/v1/zones?local_id=eq.1&select=model", undefined, alice);
+ok(r.body[0].model?.overshoot == 0.5, "alice sees the learned model");
+
+r = await call("POST", "/rest/v1/zone_daily?on_conflict=home_id,zone_local_id,day", [{ home_id: home, zone_local_id: 1, day: "2026-10-01", boiler_minutes: 120, eco_minutes: 10, hdd: 6 }], ctok, "resolution=merge-duplicates,return=minimal");
+ok(r.status == 201, "controller uploads daily figures");
+r = await call("POST", "/rest/v1/zone_daily?on_conflict=home_id,zone_local_id,day", [{ home_id: home, zone_local_id: 1, day: "2026-10-01", boiler_minutes: 90, eco_minutes: 10, hdd: 6 }], ctok, "resolution=merge-duplicates,return=minimal");
+r = await call("GET", "/rest/v1/zone_daily?select=boiler_minutes", undefined, alice);
+ok(r.body.length == 1 && r.body[0].boiler_minutes == 90, "daily figures update in place");
+r = await call("GET", "/rest/v1/zone_daily?select=*", undefined, bob);
+ok(r.body.length == 0, "bob sees no daily figures");
+r = await call("POST", "/rest/v1/zone_daily", [{ home_id: home, zone_local_id: 1, day: "2026-10-02", boiler_minutes: 1 }], alice);
+ok(r.status >= 400, "alice can't write daily figures");
+
+r = await call("POST", "/rest/v1/rpc/controller_notify", { p_kind: "switch_on", p_title: "Time to switch the heating on?", p_body: "Kitchen is forecast to fall.", p_zone_local_ids: [1] }, ctok);
+const noteId = r.body;
+ok(r.status == 200 && noteId, "controller adds advice");
+r = await call("POST", "/rest/v1/rpc/controller_notify", { p_kind: "switch_on", p_title: "again", p_body: "again", p_zone_local_ids: [1] }, ctok);
+ok(r.body === null, "same advice isn't repeated within 7 days");
+r = await call("POST", "/rest/v1/rpc/controller_notify", { p_kind: "switch_on", p_title: "x", p_body: "x", p_zone_local_ids: [1] }, alice);
+ok(r.status >= 400, "customers can't add advice");
+r = await call("GET", "/rest/v1/notifications?select=*", undefined, bob);
+ok(r.body.length == 0, "bob sees no notifications");
+r = await call("PATCH", "/rest/v1/notifications?id=eq." + noteId, { dismissed_at: new Date().toISOString() }, alice, "return=minimal");
+ok(r.status == 204, "alice dismisses advice");
+r = await call("PATCH", "/rest/v1/notifications?id=eq." + noteId, { body: "edited" }, alice);
+ok(r.status >= 400, "alice can't edit advice text");
+r = await call("POST", "/functions/v1/send-notification", { notification_id: noteId }, ctok);
+ok(r.status == 200 && r.body.reason == "email not configured", "email is skipped until Resend is set up: " + JSON.stringify(r.body));

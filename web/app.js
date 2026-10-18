@@ -304,11 +304,77 @@ function zoneCard(zone) {
   </article>`;
 }
 
+// Weather-adjusted energy figures. Before eco is switched on, fit
+// heating minutes = a + b × heating degree days on days the heating ran;
+// afterwards compare the last 7 days with what that baseline expects.
+function energySummary(daily, sensorZones) {
+  const byDay = {};
+  for (const d of daily) {
+    if (!sensorZones.has(d.zone_local_id)) continue;
+    const day = (byDay[d.day] ||= { minutes: 0, eco: 0, hdd: null });
+    day.minutes += d.boiler_minutes;
+    day.eco += d.eco_minutes;
+    if (d.hdd != null) day.hdd = Number(d.hdd);
+  }
+  const days = Object.keys(byDay).sort();
+  const today = new Date().toISOString().slice(0, 10);
+  const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
+  const lastWeek = days.filter((d) => d >= weekAgo && d < today);
+  const actual = lastWeek.reduce((s, d) => s + byDay[d].minutes, 0) / 60;
+  const ecoStart = days.find((d) => byDay[d].eco > 0);
+
+  const base = days.filter((d) => (!ecoStart || d < ecoStart) && byDay[d].minutes > 0 && byDay[d].hdd != null);
+  let expected = null;
+  if (ecoStart && base.length >= 30 && lastWeek.every((d) => byDay[d].hdd != null)) {
+    const xs = base.map((d) => byDay[d].hdd);
+    const ys = base.map((d) => byDay[d].minutes);
+    const mx = xs.reduce((s, v) => s + v, 0) / xs.length;
+    const my = ys.reduce((s, v) => s + v, 0) / ys.length;
+    const b = xs.reduce((s, x, i) => s + (x - mx) * (ys[i] - my), 0) / (xs.reduce((s, x) => s + (x - mx) ** 2, 0) || 1);
+    const a = my - b * mx;
+    expected = lastWeek.reduce((s, d) => s + Math.max(0, a + b * byDay[d].hdd), 0) / 60;
+  }
+  return { actual, expected, baseDays: base.length, ecoStart, days: lastWeek.length };
+}
+
+function energyCard(e) {
+  if (!e.days) return "";
+  let text = `<strong>${e.actual.toFixed(1)} h</strong> of heating in the last 7 days.`;
+  if (e.expected != null && e.expected > 0) {
+    const change = Math.round((1 - e.actual / e.expected) * 100);
+    text += ` For this weather you'd usually expect about ${e.expected.toFixed(1)} h, so eco saved an estimated
+      <strong>${change > 0 ? change + "%" : "nothing yet"}</strong>.
+      <span class="small muted">Based on ${e.baseDays} days before eco was switched on. An estimate, not a meter reading.</span>`;
+  } else if (!e.ecoStart) {
+    text += ` <span class="small muted">Switch on eco for a zone to start saving; savings show here once it has run for a few days.</span>`;
+  } else {
+    text += ` <span class="small muted">Savings appear once there's enough history to compare with.</span>`;
+  }
+  return `<section class="card"><h3>Energy</h3><p>${text}</p></section>`;
+}
+
+function adviceBanner(n) {
+  const action = n.kind == "switch_on" ? "Switch on" : "Switch off";
+  return `<section class="card advice">
+    <h3>${esc(n.title)}</h3>
+    <p>${esc(n.body)}</p>
+    <div class="row">
+      <button class="primary" data-advice="${n.id}">${action}</button>
+      <button data-dismiss="${n.id}">Not now</button>
+    </div>
+  </section>`;
+}
+
 async function zonesPage() {
   setNav("zones");
-  const [{ data: zones, error }, controller] = await Promise.all([
+  const yearAgo = new Date(Date.now() - 400 * 86400000).toISOString().slice(0, 10);
+  const [{ data: zones, error }, controller, { data: notes }, { data: daily }, { data: sensors }] = await Promise.all([
     supabase.from("zones").select("*").eq("home_id", home.id).order("local_id"),
     loadController(),
+    supabase.from("notifications").select("*").eq("home_id", home.id).is("dismissed_at", null)
+      .gte("created_at", new Date(Date.now() - 21 * 86400000).toISOString()).order("created_at", { ascending: false }).limit(1),
+    supabase.from("zone_daily").select("zone_local_id, day, boiler_minutes, eco_minutes, hdd").eq("home_id", home.id).gte("day", yearAgo).limit(5000),
+    supabase.from("sensors").select("zone_id").eq("home_id", home.id),
   ]);
   if (error) return render(message("error", fail(error)));
   showOfflineBanner(controller);
@@ -322,7 +388,33 @@ async function zonesPage() {
       <p>Waiting for your controller to send its zones. This happens within a minute of it connecting.</p></div>`);
   }
 
-  render(`<h1>Zones</h1><div class="zones">${zones.map(zoneCard).join("")}</div>`);
+  const zoneIdsWithSensors = new Set(sensors.map((s) => s.zone_id));
+  const sensorZones = new Set(zones.filter((z) => zoneIdsWithSensors.has(z.id)).map((z) => z.local_id));
+
+  render(`${(notes || []).map(adviceBanner).join("")}
+    <h1>Zones</h1><div class="zones">${zones.map(zoneCard).join("")}</div>
+    ${energyCard(energySummary(daily || [], sensorZones))}`);
+
+  app.querySelectorAll("[data-advice]").forEach((button) => {
+    button.onclick = async () => {
+      button.disabled = true;
+      const n = notes.find((x) => x.id == button.dataset.advice);
+      const ids = n.action?.zone_local_ids || [];
+      if (ids.length) {
+        const { error } = await supabase.from("zones").update({ is_enabled: n.kind == "switch_on" })
+          .eq("home_id", home.id).in("local_id", ids);
+        if (error) return alert(fail(error));
+      }
+      await supabase.from("notifications").update({ dismissed_at: new Date().toISOString() }).eq("id", n.id);
+      zonesPage();
+    };
+  });
+  app.querySelectorAll("[data-dismiss]").forEach((button) => {
+    button.onclick = async () => {
+      await supabase.from("notifications").update({ dismissed_at: new Date().toISOString() }).eq("id", button.dataset.dismiss);
+      zonesPage();
+    };
+  });
 
   app.querySelectorAll("[data-boost]").forEach((button) => {
     button.onclick = async () => {
@@ -355,11 +447,14 @@ async function zonePage(zoneId) {
   const { data: zone, error } = await supabase.from("zones").select("*").eq("id", zoneId).single();
   if (error) return render(message("error", "Zone not found."));
 
-  const [{ data: sensors }, { data: slots }, { data: events }] = await Promise.all([
+  const monthAgo = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+  const [{ data: sensors }, { data: slots }, { data: events }, { data: daily }] = await Promise.all([
     supabase.from("sensors").select("device_id, name").eq("zone_id", zoneId),
     supabase.from("schedule_slots").select("day, on_time, off_time, temp").eq("zone_id", zoneId).order("on_time"),
     supabase.from("zone_events").select("time, value").eq("home_id", home.id).eq("zone_local_id", zone.local_id)
       .eq("type", "BOILER").gte("time", since).order("time"),
+    supabase.from("zone_daily").select("day, boiler_minutes, eco_minutes, mean_outdoor").eq("home_id", home.id)
+      .eq("zone_local_id", zone.local_id).gte("day", monthAgo).order("day"),
   ]);
 
   const ids = sensors.map((s) => s.device_id);
@@ -375,6 +470,11 @@ async function zonePage(zoneId) {
       ${ids.length ? `<div class="chart-wrap"><canvas id="chart" role="img" aria-label="Temperature in ${esc(zone.name)} over the last 24 hours, with times the heating was on"></canvas></div>`
         : `<p class="muted">No sensors in this zone. Add one on the <a href="#/sensors">Sensors</a> page.</p>`}
     </section>
+    ${ids.length ? ecoSection(zone) : ""}
+    ${daily.length ? `<section class="card">
+      <h3>Heating time, last 30 days</h3>
+      <div class="chart-wrap short"><canvas id="daily" role="img" aria-label="Hours of heating each day in ${esc(zone.name)} over the last 30 days"></canvas></div>
+    </section>` : ""}
     <section class="card">
       <h3>Schedule</h3>
       <p class="small muted">The heating comes on in these periods when the room is below the temperature you set.</p>
@@ -387,7 +487,89 @@ async function zonePage(zoneId) {
     </section>`);
 
   if (ids.length) drawChart(sensors, readings, events, since);
+  if (daily.length) drawDaily(daily);
+  if (ids.length) bindEco(zone);
   scheduleEditor(zone, slots);
+}
+
+// What the controller has learned about the room, in plain words
+function learnedText(model) {
+  if (!model) return "Still learning how this room heats and cools. This takes a week or two of heating.";
+  const parts = [];
+  if (model.h) parts.push(`warms about ${Number(model.h).toFixed(1)} °C an hour with the heating on`);
+  if (model.k) parts.push(`loses about ${(model.k * 15).toFixed(1)} °C an hour when it's 5 °C outside`);
+  if (model.overshoot) parts.push(`keeps warming about ${Number(model.overshoot).toFixed(1)} °C after the boiler switches off`);
+  let text = parts.length ? "This room " + parts.join(", ") + "." : "";
+  if (!model.ready) text += " Still learning: eco uses the normal rules until it's confident.";
+  else if (model.stale) text += " Learned last heating season.";
+  return text;
+}
+
+function ecoSection(zone) {
+  const margins = [0, 0.5, 1, 1.5, 2];
+  return `<section class="card">
+    <h3>Energy saving</h3>
+    <label class="switch"><input type="checkbox" id="eco" ${zone.eco_enabled ? "checked" : ""}> Eco: learn this room and run the boiler less</label>
+    <label for="margin">Let the room drift below the target by up to</label>
+    <select id="margin" style="max-width:200px">${margins
+      .map((m) => `<option value="${m}" ${Number(zone.comfort_margin) == m ? "selected" : ""}>${m == 0 ? "Never below target" : m + " °C"}</option>`)
+      .join("")}</select>
+    <p class="small muted">${esc(learnedText(zone.model))}</p>
+    ${zone.is_enabled ? "" : `<p class="small muted">This zone is switched off. Its sensors check in once a day to save battery; press a sensor's button to wake it straight away.</p>`}
+    <div class="out"></div>
+  </section>`;
+}
+
+function bindEco(zone) {
+  const save = async (fields) => {
+    const { error } = await supabase.from("zones").update(fields).eq("id", zone.id);
+    if (error) alert(fail(error));
+  };
+  document.getElementById("eco").onchange = (e) => save({ eco_enabled: e.target.checked });
+  document.getElementById("margin").onchange = (e) => save({ comfort_margin: Number(e.target.value) });
+}
+
+let dailyChart = null;
+
+function drawDaily(daily) {
+  if (dailyChart) dailyChart.destroy();
+  const style = getComputedStyle(document.documentElement);
+  const muted = style.getPropertyValue("--muted").trim();
+  const grid = style.getPropertyValue("--border").trim();
+  dailyChart = new Chart(document.getElementById("daily"), {
+    type: "bar",
+    data: {
+      labels: daily.map((d) => new Date(d.day).toLocaleDateString([], { day: "numeric", month: "short" })),
+      datasets: [{
+        label: "Hours of heating",
+        data: daily.map((d) => Math.round((d.boiler_minutes / 60) * 10) / 10),
+        backgroundColor: SERIES[0],
+        borderRadius: 4,
+        maxBarThickness: 18,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: (item) => {
+              const d = daily[item.dataIndex];
+              const out = d.mean_outdoor == null ? "" : `, ${Number(d.mean_outdoor).toFixed(1)} °C outside`;
+              return `${item.parsed.y} h${out}`;
+            },
+          },
+        },
+      },
+      scales: {
+        x: { grid: { display: false }, ticks: { color: muted, maxRotation: 0, autoSkipPadding: 12 } },
+        y: { grid: { color: grid }, ticks: { color: muted, callback: (v) => v + " h" }, beginAtZero: true },
+      },
+    },
+  });
 }
 
 function drawChart(sensors, readings, events, since) {
@@ -712,7 +894,10 @@ async function sensorsPage() {
 async function settingsPage() {
   setNav("settings");
   clearInterval(refreshTimer);
-  const controller = await loadController();
+  const [controller, { data: place }] = await Promise.all([
+    loadController(),
+    supabase.from("homes").select("latitude, longitude").eq("id", home.id).single(),
+  ]);
   showOfflineBanner(controller);
 
   render(`<h1>Settings</h1>
@@ -721,6 +906,18 @@ async function settingsPage() {
       <form id="home" class="row">
         <input class="grow" name="name" value="${esc(home.name)}" maxlength="60" required aria-label="Home name">
         <button type="submit">Rename</button>
+        <div class="out" style="width:100%"></div>
+      </form>
+    </section>
+    <section class="card">
+      <h3>Location</h3>
+      <p class="small muted">Used to get the outside temperature, which helps the heating learn and tells you when to switch it on or off.
+        Rounded to about 1 km. Weather from <a href="https://open-meteo.com/">Open-Meteo</a>.</p>
+      <form id="location" class="row">
+        <input class="grow" name="lat" inputmode="decimal" placeholder="Latitude" value="${esc(place?.latitude ?? "")}" aria-label="Latitude">
+        <input class="grow" name="lon" inputmode="decimal" placeholder="Longitude" value="${esc(place?.longitude ?? "")}" aria-label="Longitude">
+        <button type="button" id="here">Use my location</button>
+        <button type="submit">Save</button>
         <div class="out" style="width:100%"></div>
       </form>
     </section>
@@ -746,6 +943,35 @@ async function settingsPage() {
       out.innerHTML = message("success", "Saved.");
     });
   };
+
+  const loc = document.getElementById("location");
+  const round2 = (v) => Math.round(Number(v) * 100) / 100;
+  document.getElementById("here").onclick = () => {
+    const out = loc.querySelector(".out");
+    if (!navigator.geolocation) return (out.innerHTML = message("error", "This browser can't share its location."));
+    navigator.geolocation.getCurrentPosition(
+      (p) => {
+        loc.lat.value = round2(p.coords.latitude);
+        loc.lon.value = round2(p.coords.longitude);
+        out.innerHTML = message("info", "Check it, then Save.");
+      },
+      () => (out.innerHTML = message("error", "Couldn't get your location. Type it in instead."))
+    );
+  };
+  loc.onsubmit = (e) => {
+    e.preventDefault();
+    submitting(loc, async (out) => {
+      const lat = loc.lat.value.trim() === "" ? null : round2(loc.lat.value);
+      const lon = loc.lon.value.trim() === "" ? null : round2(loc.lon.value);
+      if ((lat == null) != (lon == null) || (lat != null && (Math.abs(lat) > 90 || Math.abs(lon) > 180 || isNaN(lat) || isNaN(lon)))) {
+        throw new Error("Enter both latitude and longitude, or leave both empty.");
+      }
+      const { error } = await supabase.from("homes").update({ latitude: lat, longitude: lon }).eq("id", home.id);
+      if (error) throw error;
+      out.innerHTML = message("success", "Saved. Your controller picks it up within a minute.");
+    });
+  };
+
   document.getElementById("signout").onclick = () => supabase.auth.signOut();
 }
 
