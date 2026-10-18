@@ -139,3 +139,57 @@ r = await call("PATCH", "/rest/v1/notifications?id=eq." + noteId, { body: "edite
 ok(r.status >= 400, "alice can't edit advice text");
 r = await call("POST", "/functions/v1/send-notification", { notification_id: noteId }, ctok);
 ok(r.status == 200 && r.body.reason == "email not configured", "email is skipped until Resend is set up: " + JSON.stringify(r.body));
+
+// ---------------------------------------------------------------------------
+// Budget
+
+r = await call("POST", "/rest/v1/budgets", { home_id: home, monthly_pence: 8000, start_day: 15, boiler_kw: 28 }, alice, "return=minimal");
+ok(r.status == 201, "alice sets a budget");
+r = await call("POST", "/rest/v1/budgets?on_conflict=home_id", { home_id: home, monthly_pence: 9000, start_day: 15, boiler_kw: 28 }, alice, "resolution=merge-duplicates,return=minimal");
+ok(r.status == 201 || r.status == 204 || r.status == 200, "alice changes the budget (upsert): " + r.status + " " + JSON.stringify(r.body));
+r = await call("POST", "/rest/v1/budgets", { home_id: home, monthly_pence: 1 }, bob);
+ok(r.status >= 400, "bob can't set alice's budget");
+r = await call("GET", "/rest/v1/budgets?select=*", undefined, bob);
+ok(r.body.length == 0, "bob can't see alice's budget");
+r = await call("PATCH", "/rest/v1/zones?id=eq." + zones[0].id, { min_temp: 17 }, alice, "return=minimal");
+ok(r.status == 204, "alice sets a zone minimum");
+r = await call("PATCH", "/rest/v1/zones?id=eq." + zones[0].id, { budget_offset: 3 }, alice);
+ok(r.status >= 400, "alice can't set the budget offset directly");
+
+r = await call("POST", "/rest/v1/rooms", { home_id: home, zone_id: zones[0].id, name: "Kitchen", kind: "kitchen", usage: "often", periods: [{ days: [1, 2, 3, 4, 5], from: "07:00", to: "09:00" }] }, alice, "return=minimal");
+ok(r.status == 201, "alice adds a room");
+r = await call("POST", "/rest/v1/rooms", { home_id: home, zone_id: zones[0].id, name: "Sneaky" }, bob);
+ok(r.status >= 400, "bob can't add rooms to alice's home");
+
+r = await call("POST", "/rest/v1/rpc/controller_sync", { p_report: Object.assign({}, report2, { zones: report.zones.map((z) => Object.assign({}, z, { budget_offset: 1.5 })) }) }, ctok);
+ok(r.body.budget?.monthly_pence == 9000 && r.body.budget.start_day == 15 && r.body.rooms.length == 1 && r.body.rooms[0].zone_local_id == 1
+  && r.body.zones.find((z) => z.local_id == 1).min_temp == 17, "controller gets the budget, rooms and minimums");
+r = await call("GET", "/rest/v1/zones?local_id=eq.1&select=budget_offset", undefined, alice);
+ok(Number(r.body[0].budget_offset) == 1.5, "alice sees the budget offset the controller applied");
+
+r = await call("POST", "/rest/v1/energy_daily?on_conflict=home_id,day", [{ home_id: home, day: "2026-10-16", kwh: 40.5, cost_pence: 347, metered: true }], ctok, "resolution=merge-duplicates,return=minimal");
+ok(r.status == 201, "controller uploads daily energy");
+r = await call("POST", "/rest/v1/energy_daily", [{ home_id: home, day: "2026-10-17", kwh: 1, cost_pence: 1, metered: true }], alice);
+ok(r.status >= 400, "alice can't write energy figures");
+r = await call("POST", "/rest/v1/energy_status?on_conflict=home_id", [{ home_id: home, supplier: "Octopus Energy", unit_rate_pence: 7.86, standing_pence: 28.85, connected: true }], ctok, "resolution=merge-duplicates,return=minimal");
+ok(r.status == 201, "controller reports the supply");
+r = await call("POST", "/rest/v1/budget_plans", { home_id: home, period_start: "2026-10-15", period_end: "2026-11-15", budget_pence: 9000, spent_pence: 1000, forecast_pence: 8500, forecast_without_plan_pence: 9800, achievable: true, automatic: [{ text: "Kitchen 1 °C cooler" }] }, ctok, "return=minimal");
+ok(r.status == 201, "controller adds a plan");
+r = await call("POST", "/rest/v1/budget_plans", { home_id: home, period_start: "2026-10-15", period_end: "2026-11-15", budget_pence: 1, spent_pence: 0, forecast_pence: 0, forecast_without_plan_pence: 0, achievable: true }, alice);
+ok(r.status >= 400, "alice can't write plans");
+for (const t of ["energy_daily", "energy_status", "budget_plans", "rooms"]) {
+  r = await call("GET", "/rest/v1/" + t + "?select=*", undefined, bob);
+  ok(Array.isArray(r.body) && r.body.length == 0, "bob sees no " + t);
+}
+r = await call("GET", "/rest/v1/assistant_usage?select=*", undefined, alice);
+ok(r.status >= 400 || r.body.length == 0, "assistant usage isn't readable by customers");
+
+r = await call("POST", "/rest/v1/commands", { home_id: home, type: "set_octopus", payload: { account: "A-1", api_key: "test-value" } }, alice, "return=representation");
+ok(r.status == 201, "alice can send Octopus details to her controller");
+r = await call("POST", "/rest/v1/rpc/controller_notify", { p_kind: "budget_at_risk", p_title: "t", p_body: "b", p_zone_local_ids: [] }, ctok);
+ok(r.status == 200 && r.body, "controller can send budget notices");
+
+r = await call("POST", "/functions/v1/assistant", { mode: "ask", messages: [{ role: "user", content: "hi" }] }, alice);
+ok(r.status == 503 && /set up/.test(r.body.error), "assistant says it isn't set up without a key: " + JSON.stringify(r.body));
+r = await call("POST", "/functions/v1/assistant", { mode: "ask", messages: [{ role: "user", content: "hi" }] }, null);
+ok(r.status == 401, "assistant needs a signed-in user");

@@ -282,7 +282,8 @@ function zoneCard(zone) {
   const status = zone.is_on
     ? `<span class="pill heat">${flame}Heating</span>`
     : `<span class="pill">Off</span>`;
-  const target = zone.is_enabled && zone.desired_temp > 5 ? `<span class="muted small">Target ${fmtTemp(zone.desired_temp)}</span>` : "";
+  const lowered = Number(zone.budget_offset) > 0 ? ` <span class="pill">Budget −${Number(zone.budget_offset)}°</span>` : "";
+  const target = zone.is_enabled && zone.desired_temp > 5 ? `<span class="muted small">Target ${fmtTemp(zone.desired_temp)}${lowered}</span>` : "";
 
   return `<article class="card zone ${zone.is_enabled ? "" : "disabled"}">
     <div class="zone-head">
@@ -368,13 +369,14 @@ function adviceBanner(n) {
 async function zonesPage() {
   setNav("zones");
   const yearAgo = new Date(Date.now() - 400 * 86400000).toISOString().slice(0, 10);
-  const [{ data: zones, error }, controller, { data: notes }, { data: daily }, { data: sensors }] = await Promise.all([
+  const [{ data: zones, error }, controller, { data: notes }, { data: daily }, { data: sensors }, money] = await Promise.all([
     supabase.from("zones").select("*").eq("home_id", home.id).order("local_id"),
     loadController(),
     supabase.from("notifications").select("*").eq("home_id", home.id).is("dismissed_at", null)
       .gte("created_at", new Date(Date.now() - 21 * 86400000).toISOString()).order("created_at", { ascending: false }).limit(1),
     supabase.from("zone_daily").select("zone_local_id, day, boiler_minutes, eco_minutes, hdd").eq("home_id", home.id).gte("day", yearAgo).limit(5000),
     supabase.from("sensors").select("zone_id").eq("home_id", home.id),
+    loadBudget(),
   ]);
   if (error) return render(message("error", fail(error)));
   showOfflineBanner(controller);
@@ -392,7 +394,9 @@ async function zonesPage() {
   const sensorZones = new Set(zones.filter((z) => zoneIdsWithSensors.has(z.id)).map((z) => z.local_id));
 
   render(`${(notes || []).map(adviceBanner).join("")}
-    <h1>Zones</h1><div class="zones">${zones.map(zoneCard).join("")}</div>
+    <h1>Zones</h1>
+    ${budgetCard(money.budget, money.plan, true)}
+    <div class="zones">${zones.map(zoneCard).join("")}</div>
     ${energyCard(energySummary(daily || [], sensorZones))}`);
 
   app.querySelectorAll("[data-advice]").forEach((button) => {
@@ -976,6 +980,402 @@ async function settingsPage() {
 }
 
 // ---------------------------------------------------------------------------
+// Budget
+
+const pounds = (pence) => "£" + (pence / 100).toFixed(2);
+const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+function budgetStatus(plan) {
+  if (!plan) return { text: "Planning…", kind: "info" };
+  if (!plan.achievable) return { text: "Can't meet the budget at your minimum temperatures", kind: "error" };
+  if (plan.suggestions?.length && plan.forecast_pence > plan.budget_pence) return { text: "Needs your approval to stay within budget", kind: "error" };
+  if (plan.automatic?.length) return { text: `Saving to stay within budget (${plan.automatic.length} change${plan.automatic.length == 1 ? "" : "s"})`, kind: "info" };
+  return { text: "On track", kind: "success" };
+}
+
+function budgetCard(budget, plan, compact) {
+  if (!budget) {
+    return compact ? "" : `<section class="card"><h3>Monthly budget</h3><p>Set a monthly budget and the heating will plan to stay within it.</p></section>`;
+  }
+  const status = budgetStatus(plan);
+  const spent = plan ? plan.spent_pence : 0;
+  const forecast = plan ? plan.forecast_pence : null;
+  const pct = (v) => Math.min(100, Math.round((v / budget.monthly_pence) * 100));
+  return `<section class="card budget">
+    <div class="row"><h3 class="grow" style="margin:0">Budget this month</h3>${compact ? `<a href="#/budget" class="small">Details</a>` : ""}</div>
+    <div class="bar" role="img" aria-label="Spent ${pounds(spent)} of ${pounds(budget.monthly_pence)}${forecast != null ? `, heading for ${pounds(forecast)}` : ""}">
+      <span class="spent" style="width:${pct(spent)}%"></span>
+      ${forecast != null ? `<span class="forecast" style="width:${pct(forecast)}%"></span>` : ""}
+    </div>
+    <p><strong>${pounds(spent)}</strong> spent of <strong>${pounds(budget.monthly_pence)}</strong>${forecast != null ? `, heading for about <strong>${pounds(forecast)}</strong>` : ""}.
+      ${plan?.estimated ? `<span class="small muted">Partly estimated from boiler time.</span>` : ""}</p>
+    ${message(status.kind, status.text)}
+  </section>`;
+}
+
+async function loadBudget() {
+  const [{ data: budget }, { data: plan }] = await Promise.all([
+    supabase.from("budgets").select("*").eq("home_id", home.id).maybeSingle(),
+    supabase.from("budget_plans").select("*").eq("home_id", home.id).order("created_at", { ascending: false }).limit(1).maybeSingle(),
+  ]);
+  return { budget, plan };
+}
+
+async function askAssistant(mode, messages) {
+  const { data, error } = await supabase.functions.invoke("assistant", { body: { mode, messages } });
+  if (error) {
+    let text = error.message;
+    try {
+      text = (await error.context.json()).error || text;
+    } catch {}
+    throw new Error(text);
+  }
+  if (data.error) throw new Error(data.error);
+  return data;
+}
+
+function chatBox(id, placeholder) {
+  return `<div class="chat" id="${id}">
+    <div class="chat-log"></div>
+    <form class="row"><input class="grow" name="q" placeholder="${esc(placeholder)}" autocomplete="off" required aria-label="${esc(placeholder)}">
+      <button class="primary" type="submit">Send</button><div class="out" style="width:100%"></div></form>
+  </div>`;
+}
+
+// A chat with the assistant; onProposal gets any structured proposal
+function bindChat(id, mode, onProposal) {
+  const box = document.getElementById(id);
+  const log = box.querySelector(".chat-log");
+  const form = box.querySelector("form");
+  const history = [];
+  const add = (role, text) => {
+    const p = document.createElement("p");
+    p.className = "chat-" + role;
+    p.textContent = text;
+    log.appendChild(p);
+  };
+  form.onsubmit = (e) => {
+    e.preventDefault();
+    const q = form.q.value.trim();
+    if (!q) return;
+    submitting(form, async () => {
+      add("user", q);
+      history.push({ role: "user", content: q });
+      form.q.value = "";
+      const result = await askAssistant(mode, history);
+      add("assistant", result.reply);
+      history.push({ role: "assistant", content: result.reply });
+      if (result.proposal && onProposal) onProposal(result.proposal);
+    });
+  };
+}
+
+async function budgetPage() {
+  setNav("budget");
+  clearInterval(refreshTimer);
+  const [{ budget, plan }, { data: zones }, { data: status }, controller] = await Promise.all([
+    loadBudget(),
+    supabase.from("zones").select("id, local_id, name, min_temp, budget_offset").eq("home_id", home.id).order("local_id"),
+    supabase.from("energy_status").select("*").eq("home_id", home.id).maybeSingle(),
+    loadController(),
+  ]);
+  showOfflineBanner(controller);
+  const periodStart = plan?.period_start;
+  const { data: daily } = periodStart
+    ? await supabase.from("energy_daily").select("day, kwh, cost_pence, metered").eq("home_id", home.id).gte("day", periodStart).order("day")
+    : { data: [] };
+  const zoneByLocal = Object.fromEntries(zones.map((z) => [z.local_id, z]));
+
+  render(`<h1>Budget</h1>
+    ${budgetCard(budget, plan, false)}
+    ${plan ? `<section class="card">
+      <h3>The plan</h3>
+      <p><button id="explain">Explain my plan</button></p>
+      <div id="explanation"></div>
+      ${plan.automatic.length ? `<p class="small muted">Changes made automatically:</p><ul>${plan.automatic.map((a) => `<li>${esc(a.text)}</li>`).join("")}</ul>`
+        : `<p class="muted">No changes needed at the moment.</p>`}
+      ${plan.suggestions.length ? `<p class="small muted">Suggestions${plan.forecast_pence > plan.budget_pence ? ", needed to stay within budget" : ""}:</p>
+        ${plan.suggestions.map((s) => `<div class="row suggestion">
+          <span class="grow">${esc(s.text)} <span class="small muted">Saves about ${pounds(s.saving_pence)} this month.</span></span>
+          <button class="primary" data-apply="${esc(s.key)}">Apply</button><button data-decline="${esc(s.key)}">Not now</button></div>`).join("")}` : ""}
+      ${plan.trv_advice.length ? `<p class="small muted">Radiator valves:</p><ul>${plan.trv_advice.map((t) => `<li>${esc(t.text)}</li>`).join("")}</ul>` : ""}
+    </section>` : ""}
+    ${daily.length ? `<section class="card"><h3>Daily cost this month</h3>
+      <div class="chart-wrap short"><canvas id="costs" role="img" aria-label="Gas cost each day this billing month"></canvas></div></section>` : ""}
+    <section class="card">
+      <h3>Ask about your heating</h3>
+      ${chatBox("ask", "e.g. Why is this month more expensive?")}
+    </section>
+    <section class="card">
+      <h3>Budget settings</h3>
+      <form id="budget">
+        <div class="row">
+          <label class="grow">Monthly budget (£)<input name="pounds" type="number" min="1" step="1" value="${budget ? Math.round(budget.monthly_pence / 100) : ""}" required></label>
+          <label class="grow">Billing day<input name="day" type="number" min="1" max="28" value="${budget?.start_day ?? 1}" required></label>
+          <label class="grow">Boiler size (kW)<input name="kw" type="number" min="4" max="60" step="0.5" value="${budget?.boiler_kw ?? 24}" required></label>
+        </div>
+        <p class="small muted">The lowest each zone may go to stay within budget:</p>
+        ${zones.map((z) => `<div class="row"><span class="grow">${esc(z.name)}</span>
+          <select data-min="${z.id}" aria-label="Minimum for ${esc(z.name)}">${[5, 10, 12, 14, 15, 16, 17, 18, 19, 20].map((t) =>
+            `<option value="${t}" ${Number(z.min_temp) == t ? "selected" : ""}>${t == 5 ? "Frost only" : t + " °C"}</option>`).join("")}</select></div>`).join("")}
+        <div class="out"></div>
+        <button class="primary" type="submit">Save</button>
+        <p class="small muted">Tell us <a href="#/home">which rooms you use and when</a> and the plan can cool the right places.</p>
+      </form>
+    </section>
+    <section class="card">
+      <h3>Octopus Energy</h3>
+      ${status?.connected ? `<p>Connected. ${esc(status.tariff_code || "")}: ${Number(status.unit_rate_pence).toFixed(2)}p per kWh, ${Number(status.standing_pence).toFixed(2)}p a day.
+          Latest meter reading ${fmtAgo(status.last_reading_at)}. Your meter reports in ${status.meter_unit == "m3" ? "cubic metres" : "kWh"}.</p>`
+        : `<p class="small muted">${status?.error ? esc(status.error) + ". " : ""}Until Octopus is connected, costs are estimated from boiler time and the Ofgem price cap.</p>`}
+      <form id="octopus">
+        <div class="row">
+          <label class="grow">Account number<input name="account" placeholder="A-1234ABCD" autocomplete="off" required></label>
+          <label class="grow">API key<input name="key" type="password" autocomplete="off" placeholder="${status?.connected ? "unchanged" : "sk_live_…"}"></label>
+          <label class="grow">Meter units<select name="unit"><option value="">Detect</option><option value="kWh">kWh</option><option value="m3">Cubic metres</option></select></label>
+        </div>
+        <p class="small muted">Find both on your Octopus account page under "API access". The key is stored only on your controller.</p>
+        <div class="out"></div>
+        <button type="submit">Connect</button>
+      </form>
+    </section>`);
+
+  if (daily.length) drawCosts(daily);
+  bindChat("ask", "ask");
+
+  document.getElementById("explain")?.addEventListener("click", async (e) => {
+    const out = document.getElementById("explanation");
+    e.target.disabled = true;
+    out.innerHTML = message("info", "Thinking…");
+    try {
+      out.innerHTML = `<p class="assistant-note">${esc((await askAssistant("explain", [])).reply).replace(/\n+/g, "<br><br>")}</p>`;
+    } catch (error) {
+      out.innerHTML = message("error", fail(error));
+    }
+    e.target.disabled = false;
+  });
+
+  app.querySelectorAll("[data-apply]").forEach((b) => {
+    b.onclick = async () => {
+      const s = plan.suggestions.find((x) => x.key == b.dataset.apply);
+      const zone = zoneByLocal[s.zone_local_id];
+      if (!confirm(`${s.text}\n\nThis changes the ${zone.name} schedule. Apply?`)) return;
+      b.disabled = true;
+      const { error } = await supabase.rpc("set_zone_schedule", {
+        p_zone: zone.id,
+        p_slots: s.schedule.map((x) => ({ day: x.day, on_time: x.onTime.slice(0, 5), off_time: x.offTime.slice(0, 5), temp: x.temp })),
+      });
+      if (error) return alert(fail(error));
+      b.closest(".suggestion").innerHTML = message("success", "Applied. The plan updates within the hour.");
+    };
+  });
+  app.querySelectorAll("[data-decline]").forEach((b) => {
+    b.onclick = async () => {
+      const declined = (budget.declined_suggestions || []).concat(b.dataset.decline);
+      const { error } = await supabase.from("budgets").update({ declined_suggestions: declined }).eq("home_id", home.id);
+      if (error) return alert(fail(error));
+      budget.declined_suggestions = declined;
+      b.closest(".suggestion").remove();
+    };
+  });
+
+  const form = document.getElementById("budget");
+  form.onsubmit = (e) => {
+    e.preventDefault();
+    submitting(form, async (out) => {
+      const fields = {
+        home_id: home.id,
+        monthly_pence: Math.round(Number(form.pounds.value) * 100),
+        start_day: Number(form.day.value),
+        boiler_kw: Number(form.kw.value),
+        updated_at: new Date().toISOString(),
+      };
+      const { error } = await supabase.from("budgets").upsert(fields);
+      if (error) throw error;
+      for (const sel of form.querySelectorAll("[data-min]")) {
+        const { error: e2 } = await supabase.from("zones").update({ min_temp: Number(sel.value) }).eq("id", sel.dataset.min);
+        if (e2) throw e2;
+      }
+      out.innerHTML = message("success", "Saved. Your controller makes a new plan within the hour.");
+    });
+  };
+
+  const oct = document.getElementById("octopus");
+  oct.onsubmit = (e) => {
+    e.preventDefault();
+    submitting(oct, async (out) => {
+      out.innerHTML = message("info", "Checking with Octopus through your controller…");
+      const payload = { account: oct.account.value.trim(), unit: oct.unit.value || null };
+      if (oct.key.value.trim()) payload.api_key = oct.key.value.trim();
+      const result = await runCommand("set_octopus", payload, 90000);
+      if (result.error) throw new Error(result.error);
+      oct.key.value = "";
+      out.innerHTML = message("success", `Connected (${result.tariff}). Readings and costs appear within the hour.`);
+    });
+  };
+}
+
+let costChart = null;
+
+function drawCosts(daily) {
+  if (costChart) costChart.destroy();
+  const style = getComputedStyle(document.documentElement);
+  const muted = style.getPropertyValue("--muted").trim();
+  const grid = style.getPropertyValue("--border").trim();
+  costChart = new Chart(document.getElementById("costs"), {
+    type: "bar",
+    data: {
+      labels: daily.map((d) => new Date(d.day).toLocaleDateString([], { day: "numeric", month: "short" })),
+      datasets: [{
+        label: "Cost",
+        data: daily.map((d) => d.cost_pence / 100),
+        backgroundColor: daily.map((d) => (d.metered ? SERIES[0] : SERIES[0] + "66")),
+        borderRadius: 4,
+        maxBarThickness: 18,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: (item) => {
+          const d = daily[item.dataIndex];
+          return `£${(d.cost_pence / 100).toFixed(2)}, ${Number(d.kwh).toFixed(1)} kWh${d.metered ? "" : " (estimated)"}`;
+        } } },
+      },
+      scales: {
+        x: { grid: { display: false }, ticks: { color: muted, maxRotation: 0, autoSkipPadding: 12 } },
+        y: { grid: { color: grid }, beginAtZero: true, ticks: { color: muted, callback: (v) => "£" + v } },
+      },
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Your home: rooms and when they're used
+
+// Common times for the manual room form
+const WEEK = [1, 2, 3, 4, 5];
+const ALL = [0, 1, 2, 3, 4, 5, 6];
+const USE_TIMES = {
+  "Any time": [],
+  "Evenings": [{ days: ALL, from: "17:00", to: "23:00" }],
+  "Mornings and evenings": [{ days: ALL, from: "06:30", to: "09:00" }, { days: ALL, from: "17:00", to: "23:00" }],
+  "Nights": [{ days: ALL, from: "21:00", to: "23:30" }, { days: ALL, from: "06:00", to: "08:00" }],
+  "Weekday working hours": [{ days: WEEK, from: "08:30", to: "17:30" }],
+  "Weekends": [{ days: [0, 6], from: "08:00", to: "23:00" }],
+};
+
+function describePeriods(periods) {
+  if (!periods?.length) return "Any time";
+  return periods.map((p) => {
+    const days = [...p.days].sort().join(",");
+    const label = days == "1,2,3,4,5" ? "Weekdays" : days == "0,6" ? "Weekends" : days == "0,1,2,3,4,5,6" ? "Every day" : p.days.map((d) => DAY_NAMES[d]).join(" ");
+    return `${label} ${p.from}–${p.to}`;
+  }).join("; ");
+}
+
+async function homePage() {
+  setNav("budget");
+  clearInterval(refreshTimer);
+  const [{ data: rooms }, { data: zones }] = await Promise.all([
+    supabase.from("rooms").select("*").eq("home_id", home.id).order("name"),
+    supabase.from("zones").select("id, local_id, name").eq("home_id", home.id).order("local_id"),
+  ]);
+  const zoneName = Object.fromEntries(zones.map((z) => [z.id, z.name]));
+  const usageLabel = { often: "Used often", sometimes: "Used sometimes", rarely: "Rarely used" };
+
+  render(`<p class="small"><a href="#/budget">← Budget</a></p>
+    <h1>Your home</h1>
+    <section class="card">
+      <h3>Tell us about your rooms</h3>
+      <p class="small muted">Which rooms are on each floor, and when you use them, so the budget plan cools the right places. The assistant asks a few questions and then suggests a list for you to check.</p>
+      ${chatBox("home-chat", "e.g. Upstairs is two bedrooms and a study…")}
+      <div id="proposal"></div>
+    </section>
+    <section class="card">
+      <h3>Rooms</h3>
+      ${rooms.length ? `<table><thead><tr><th>Room</th><th class="hide-small">Zone</th><th>Use</th><th class="hide-small">Valve</th><th></th></tr></thead><tbody>
+        ${rooms.map((r) => `<tr><td>${esc(r.name)}</td><td class="hide-small">${esc(zoneName[r.zone_id] || "–")}</td>
+          <td>${usageLabel[r.usage]}<div class="small muted">${esc(describePeriods(r.periods))}</div></td>
+          <td class="hide-small">${r.has_trv ? "Yes" : "No"}</td>
+          <td><button class="link danger" data-room="${r.id}">Remove</button></td></tr>`).join("")}</tbody></table>`
+        : `<p class="muted">No rooms yet.</p>`}
+      <form id="add-room" class="row" style="margin-top:12px">
+        <input class="grow" name="name" placeholder="Room name" maxlength="40" required aria-label="Room name">
+        <select class="grow" name="zone" aria-label="Zone">${zones.map((z) => `<option value="${z.id}">${esc(z.name)}</option>`).join("")}</select>
+        <select class="grow" name="usage" aria-label="How often it's used">
+          <option value="often">Used often</option><option value="sometimes">Used sometimes</option><option value="rarely">Rarely used</option></select>
+        <select class="grow" name="when" aria-label="When it's used">${Object.keys(USE_TIMES).map((k) => `<option value="${k}">${esc(k)}</option>`).join("")}</select>
+        <label class="switch"><input type="checkbox" name="trv" checked> Radiator valve</label>
+        <button type="submit">Add room</button>
+        <div class="out" style="width:100%"></div>
+      </form>
+    </section>`);
+
+  bindChat("home-chat", "home", (proposal) => showProposal(proposal, zones));
+
+  const add = document.getElementById("add-room");
+  add.onsubmit = (e) => {
+    e.preventDefault();
+    submitting(add, async () => {
+      const { error } = await supabase.from("rooms").insert({
+        home_id: home.id,
+        zone_id: add.zone.value,
+        name: add.querySelector("[name=name]").value.trim(),
+        usage: add.usage.value,
+        has_trv: add.trv.checked,
+        periods: USE_TIMES[add.when.value],
+      });
+      if (error) throw error;
+      homePage();
+    });
+  };
+  app.querySelectorAll("[data-room]").forEach((b) => {
+    b.onclick = async () => {
+      if (!confirm("Remove this room?")) return;
+      const { error } = await supabase.from("rooms").delete().eq("id", b.dataset.room);
+      if (error) return alert(fail(error));
+      homePage();
+    };
+  });
+}
+
+function showProposal(proposal, zones) {
+  const byLocal = Object.fromEntries(zones.map((z) => [z.local_id, z]));
+  const rooms = (proposal.rooms || []).filter((r) => byLocal[r.zone_local_id]);
+  const box = document.getElementById("proposal");
+  box.innerHTML = `<h3>Suggested rooms</h3>
+    <table><thead><tr><th>Room</th><th>Zone</th><th>Use</th><th class="hide-small">Valve</th></tr></thead><tbody>
+    ${rooms.map((r) => `<tr><td>${esc(r.name)}</td><td>${esc(byLocal[r.zone_local_id].name)}</td>
+      <td>${esc(r.usage)}<div class="small muted">${esc(describePeriods(r.periods))}</div></td><td class="hide-small">${r.has_trv ? "Yes" : "No"}</td></tr>`).join("")}
+    </tbody></table>
+    <form class="row" id="save-rooms"><button class="primary" type="submit">Save these rooms</button>
+      <span class="small muted">Replaces your current list.</span><div class="out" style="width:100%"></div></form>`;
+  const form = document.getElementById("save-rooms");
+  form.onsubmit = (e) => {
+    e.preventDefault();
+    submitting(form, async () => {
+      const { error: delError } = await supabase.from("rooms").delete().eq("home_id", home.id);
+      if (delError) throw delError;
+      const { error } = await supabase.from("rooms").insert(rooms.map((r) => ({
+        home_id: home.id,
+        zone_id: byLocal[r.zone_local_id].id,
+        name: r.name.slice(0, 40),
+        kind: r.kind,
+        has_trv: r.has_trv,
+        usage: r.usage,
+        periods: r.periods,
+      })));
+      if (error) throw error;
+      homePage();
+    });
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Routing
 
 async function route_() {
@@ -1000,6 +1400,8 @@ async function route_() {
   try {
     if (hash.startsWith("#/zone/")) return await zonePage(hash.slice("#/zone/".length));
     if (hash == "#/sensors") return await sensorsPage();
+    if (hash == "#/budget") return await budgetPage();
+    if (hash == "#/home") return await homePage();
     if (hash == "#/settings") return await settingsPage();
     return await zonesPage();
   } catch (error) {

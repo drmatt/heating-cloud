@@ -233,3 +233,19 @@ td.num { font-variant-numeric: tabular-nums; }
   .slot { grid-template-columns: 1fr 1fr 70px auto; }
   .hide-small { display: none; }
 }
+
+/* Budget */
+
+.bar { position: relative; height: 12px; border-radius: 6px; background: var(--surface-2); margin: 12px 0 8px; overflow: hidden; }
+.bar .forecast { position: absolute; inset: 0 auto 0 0; background: var(--accent); opacity: 0.3; border-radius: 6px; }
+.bar .spent { position: absolute; inset: 0 auto 0 0; background: var(--accent); border-radius: 6px; z-index: 1; }
+.budget .message { margin-bottom: 0; }
+.suggestion { padding: 8px 0; border-top: 1px solid var(--border); }
+.row label { margin-top: 0; }
+.row label input, .row label select { margin-top: 4px; }
+
+.chat-log { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }
+.chat-log p { margin: 0; padding: 8px 12px; border-radius: 10px; max-width: 85%; white-space: pre-wrap; }
+.chat-user { align-self: flex-end; background: var(--accent); color: var(--accent-text); }
+.chat-assistant { align-self: flex-start; background: var(--surface-2); }
+.assistant-note { background: var(--surface-2); padding: 12px; border-radius: 10px; }
