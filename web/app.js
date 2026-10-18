@@ -9,7 +9,7 @@
 //   #/settings         home, controller and account
 
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm";
-import { config } from "./config.js";
+import { config } from "./config.js?v=2026101803";
 
 const app = document.getElementById("app");
 const topbar = document.getElementById("topbar");
@@ -1085,8 +1085,23 @@ async function budgetPage() {
     ? await supabase.from("energy_daily").select("day, kwh, cost_pence, metered").eq("home_id", home.id).gte("day", periodStart).order("day")
     : { data: [] };
   const zoneByLocal = Object.fromEntries(zones.map((z) => [z.local_id, z]));
-  // suggestions already applied or declined stay hidden until the next plan
-  if (plan) plan.suggestions = plan.suggestions.filter((s) => !(budget?.declined_suggestions || []).includes(s.key));
+  if (plan) {
+    // hide suggestions already applied or declined, and any the schedule has
+    // already caught up with (the plan can be up to an hour old)
+    const handled = budget?.declined_suggestions || [];
+    const zoneIds = [...new Set(plan.suggestions.map((s) => zoneByLocal[s.zone_local_id]?.id).filter(Boolean))];
+    const { data: slots } = zoneIds.length
+      ? await supabase.from("schedule_slots").select("zone_id, on_time, off_time").in("zone_id", zoneIds)
+      : { data: [] };
+    const minutes = (t) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5));
+    const scheduled = (list, on, off) => list.reduce((sum, x) => sum + minutes(x[off]) - minutes(x[on]), 0);
+    plan.suggestions = plan.suggestions.filter((s) => {
+      if (handled.includes(s.key)) return false;
+      const zone = zoneByLocal[s.zone_local_id];
+      const now = scheduled(slots.filter((x) => x.zone_id == zone?.id), "on_time", "off_time");
+      return now > scheduled(s.schedule, "onTime", "offTime");
+    });
+  }
 
   render(`<h1>Budget</h1>
     ${budgetCard(budget, plan, false)}
