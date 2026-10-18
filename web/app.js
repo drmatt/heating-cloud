@@ -9,7 +9,7 @@
 //   #/settings         home, controller and account
 
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm";
-import { config } from "./config.js?v=2026101803";
+import { config } from "./config.js?v=2026101804";
 
 const app = document.getElementById("app");
 const topbar = document.getElementById("topbar");
@@ -1073,11 +1073,12 @@ function bindChat(id, mode, onProposal) {
 async function budgetPage() {
   setNav("budget");
   clearInterval(refreshTimer);
-  const [{ budget, plan }, { data: zones }, { data: status }, controller] = await Promise.all([
+  const [{ budget, plan }, { data: zones }, { data: status }, controller, { data: acc }] = await Promise.all([
     loadBudget(),
     supabase.from("zones").select("id, local_id, name, min_temp, budget_offset").eq("home_id", home.id).order("local_id"),
     supabase.from("energy_status").select("*").eq("home_id", home.id).maybeSingle(),
     loadController(),
+    supabase.from("model_accuracy").select("summary").eq("home_id", home.id).maybeSingle(),
   ]);
   showOfflineBanner(controller);
   const periodStart = plan?.period_start;
@@ -1119,6 +1120,7 @@ async function budgetPage() {
     </section>` : ""}
     ${daily.length ? `<section class="card"><h3>Daily cost this month</h3>
       <div class="chart-wrap short"><canvas id="costs" role="img" aria-label="Gas cost each day this billing month"></canvas></div></section>` : ""}
+    ${accuracyCard(acc?.summary, zones)}
     <section class="card">
       <h3>Ask about your heating</h3>
       ${chatBox("ask", "e.g. Why is this month more expensive?")}
@@ -1234,6 +1236,30 @@ async function budgetPage() {
       out.innerHTML = message("success", `Connected (${result.tariff}). Readings and costs appear within the hour.`);
     });
   };
+}
+
+// How well the controller's predictions have matched reality lately
+function accuracyCard(a, zones) {
+  if (!a) return "";
+  const s = a.summary || {};
+  const zoneName = Object.fromEntries(zones.map((z) => [String(z.local_id), z.name]));
+  const lines = [];
+  if (s.gas_kwh_day) lines.push(`Daily gas forecasts: within ${s.gas_kwh_day.meanPercentError ?? "–"}% on average over ${s.gas_kwh_day.n} days, ` +
+    `${s.gas_kwh_day.bias > 0 ? "a little high" : s.gas_kwh_day.bias < 0 ? "a little low" : "unbiased"} (${s.gas_kwh_day.bias > 0 ? "+" : ""}${s.gas_kwh_day.bias} kWh).`);
+  if (s.room_temp_60) lines.push(`Room temperatures an hour ahead: within ${s.room_temp_60.meanError} °C on average (${s.room_temp_60.n} checks).`);
+  if (s.room_peak_2h) lines.push(`Warmth after an early switch-off: within ${s.room_peak_2h.meanError} °C (${s.room_peak_2h.n} checks).`);
+  if (s.outdoor_mean_day) lines.push(`Weather forecasts: within ${s.outdoor_mean_day.meanError} °C a day (${s.outdoor_mean_day.n} days).`);
+  if (s.month_cost) lines.push(`Month-end forecasts: within ${(s.month_cost.meanError / 100).toFixed(2)} pounds (${s.month_cost.n} forecasts).`);
+  const corrections = [];
+  if (a.gasFactor && a.gasFactor != 1) corrections.push(`gas forecasts are scaled by ${a.gasFactor} to match your meter`);
+  Object.entries(a.kScale || {}).forEach(([z, k]) => {
+    if (k != 1) corrections.push(`${zoneName[z] || "zone " + z} cools ${k > 1 ? "faster" : "slower"} than first learned (×${k})`);
+  });
+  return `<section class="card"><h3>How accurate the forecasts are</h3>
+    ${lines.length ? `<ul>${lines.map((l) => `<li>${esc(l)}</li>`).join("")}</ul>` : `<p class="muted">Still collecting: forecasts are checked against your meter and sensors as each day passes.</p>`}
+    ${corrections.length ? `<p class="small muted">Corrections in use: ${esc(corrections.join("; "))}.</p>` : ""}
+    <p class="small muted">Every forecast is kept and checked, and the corrections update each night.</p>
+  </section>`;
 }
 
 let costChart = null;
