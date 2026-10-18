@@ -249,3 +249,10 @@ td.num { font-variant-numeric: tabular-nums; }
 .chat-user { align-self: flex-end; background: var(--accent); color: var(--accent-text); }
 .chat-assistant { align-self: flex-start; background: var(--surface-2); }
 .assistant-note { background: var(--surface-2); padding: 12px; border-radius: 10px; }
+
+/* Too hot / too cold */
+
+.feel { margin-top: 4px; }
+.feel button { flex: 1 1 140px !important; font-size: 17px; padding: 12px 16px; font-weight: 600; }
+.feel-cold { color: var(--accent); border-color: var(--accent); }
+.feel-hot { color: var(--heat); border-color: var(--heat); }

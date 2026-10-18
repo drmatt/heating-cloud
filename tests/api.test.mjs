@@ -193,3 +193,32 @@ r = await call("POST", "/functions/v1/assistant", { mode: "ask", messages: [{ ro
 ok(r.status == 503 && /set up/.test(r.body.error), "assistant says it isn't set up without a key: " + JSON.stringify(r.body));
 r = await call("POST", "/functions/v1/assistant", { mode: "ask", messages: [{ role: "user", content: "hi" }] }, null);
 ok(r.status == 401, "assistant needs a signed-in user");
+
+// ---------------------------------------------------------------------------
+// Too hot / too cold
+
+r = await call("POST", "/rest/v1/rpc/report_comfort", { p_zone: zones[0].id, p_room: null, p_feeling: "cold" }, alice);
+ok(r.status == 200 && r.body.bump == 1, "alice reports cold: +1 °C for two hours " + JSON.stringify(r.body));
+r = await call("POST", "/rest/v1/rpc/report_comfort", { p_zone: zones[0].id, p_room: null, p_feeling: "cold" }, alice);
+r = await call("POST", "/rest/v1/rpc/report_comfort", { p_zone: zones[0].id, p_room: null, p_feeling: "cold" }, alice);
+ok(r.body.bump == 2, "repeated cold reports add up to at most 2 °C");
+r = await call("POST", "/rest/v1/rpc/report_comfort", { p_zone: zones[0].id, p_room: null, p_feeling: "hot" }, alice);
+ok(r.body.bump == 1, "a hot report takes a degree back");
+r = await call("POST", "/rest/v1/rpc/report_comfort", { p_zone: zones[0].id, p_room: null, p_feeling: "cold" }, bob);
+ok(r.status >= 400, "bob can't report on alice's zones");
+r = await call("POST", "/rest/v1/rpc/report_comfort", { p_zone: zones[0].id, p_room: null, p_feeling: "lukewarm" }, alice);
+ok(r.status >= 400, "only hot or cold");
+r = await call("GET", "/rest/v1/comfort_feedback?select=feeling,room_temp,context", undefined, alice);
+ok(r.body.length == 4 && r.body[0].context && "eco" in r.body[0].context, "reports are kept with their conditions");
+r = await call("GET", "/rest/v1/comfort_feedback?select=*", undefined, ctok);
+ok(r.body.length == 4, "the controller can read the reports");
+r = await call("GET", "/rest/v1/comfort_feedback?select=*", undefined, bob);
+ok(r.body.length == 0, "bob can't see them");
+r = await call("POST", "/rest/v1/comfort_feedback", { home_id: home, zone_id: zones[0].id, feeling: "cold" }, alice);
+ok(r.status >= 400, "reports only go through report_comfort");
+r = await call("POST", "/rest/v1/rpc/controller_report_comfort", { p_prefs: [{ local_id: 1, preferred: 20.5, reports: 4 }] }, ctok);
+ok(r.status < 300, "the controller reports what it learned");
+r = await call("GET", "/rest/v1/zones?local_id=eq.1&select=comfort_preferred,comfort_reports,comfort_bump", undefined, alice);
+ok(Number(r.body[0].comfort_preferred) == 20.5 && r.body[0].comfort_reports == 4, "alice sees the learned preference");
+r = await call("POST", "/rest/v1/rpc/controller_report_comfort", { p_prefs: [] }, alice);
+ok(r.status >= 400, "customers can't set learned preferences");

@@ -9,7 +9,7 @@
 //   #/settings         home, controller and account
 
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm";
-import { config } from "./config.js?v=2026101804";
+import { config } from "./config.js?v=2026101805";
 
 const app = document.getElementById("app");
 const topbar = document.getElementById("topbar");
@@ -283,7 +283,9 @@ function zoneCard(zone) {
     ? `<span class="pill heat">${flame}Heating</span>`
     : `<span class="pill">Off</span>`;
   const lowered = Number(zone.budget_offset) > 0 ? ` <span class="pill">Budget −${Number(zone.budget_offset)}°</span>` : "";
-  const target = zone.is_enabled && zone.desired_temp > 5 ? `<span class="muted small">Target ${fmtTemp(zone.desired_temp)}${lowered}</span>` : "";
+  const nudged = zone.comfort_bump_until && Date.parse(zone.comfort_bump_until) > Date.now() && Number(zone.comfort_bump)
+    ? ` <span class="pill">${Number(zone.comfort_bump) > 0 ? "Warmer" : "Cooler"} until ${fmtTime(zone.comfort_bump_until)}</span>` : "";
+  const target = zone.is_enabled && zone.desired_temp > 5 ? `<span class="muted small">Target ${fmtTemp(zone.desired_temp)}${lowered}${nudged}</span>` : "";
 
   return `<article class="card zone ${zone.is_enabled ? "" : "disabled"}">
     <div class="zone-head">
@@ -394,10 +396,22 @@ async function zonesPage() {
   const sensorZones = new Set(zones.filter((z) => zoneIdsWithSensors.has(z.id)).map((z) => z.local_id));
 
   render(`${(notes || []).map(adviceBanner).join("")}
+    <div class="feel row">
+      <button class="feel-cold" data-feel="cold">Too cold</button>
+      <button class="feel-hot" data-feel="hot">Too hot</button>
+    </div>
+    <div id="feel-panel"></div>
     <h1>Zones</h1>
     ${budgetCard(money.budget, money.plan, true)}
     <div class="zones">${zones.map(zoneCard).join("")}</div>
     ${energyCard(energySummary(daily || [], sensorZones))}`);
+
+  app.querySelectorAll("[data-feel]").forEach((button) => {
+    button.onclick = () => {
+      clearInterval(refreshTimer); // don't redraw while choosing a room
+      comfortPanel(button.dataset.feel, zones);
+    };
+  });
 
   app.querySelectorAll("[data-advice]").forEach((button) => {
     button.onclick = async () => {
@@ -475,6 +489,7 @@ async function zonePage(zoneId) {
         : `<p class="muted">No sensors in this zone. Add one on the <a href="#/sensors">Sensors</a> page.</p>`}
     </section>
     ${ids.length ? ecoSection(zone) : ""}
+    ${comfortSection(zone, slots)}
     ${daily.length ? `<section class="card">
       <h3>Heating time, last 30 days</h3>
       <div class="chart-wrap short"><canvas id="daily" role="img" aria-label="Hours of heating each day in ${esc(zone.name)} over the last 30 days"></canvas></div>
@@ -494,6 +509,17 @@ async function zonePage(zoneId) {
   if (daily.length) drawDaily(daily);
   if (ids.length) bindEco(zone);
   scheduleEditor(zone, slots);
+
+  document.getElementById("use-preferred")?.addEventListener("click", async (e) => {
+    const temp = Number(e.target.dataset.temp);
+    e.target.disabled = true;
+    const { error } = await supabase.rpc("set_zone_schedule", {
+      p_zone: zone.id,
+      p_slots: slots.map((s) => ({ day: s.day, on_time: s.on_time.slice(0, 5), off_time: s.off_time.slice(0, 5), temp })),
+    });
+    if (error) return alert(fail(error));
+    zonePage(zone.id);
+  });
 }
 
 // What the controller has learned about the room, in plain words
@@ -977,6 +1003,84 @@ async function settingsPage() {
   };
 
   document.getElementById("signout").onclick = () => supabase.auth.signOut();
+}
+
+// ---------------------------------------------------------------------------
+// Too hot / too cold
+
+async function comfortPanel(feeling, zones) {
+  const panel = document.getElementById("feel-panel");
+  const { data: rooms } = await supabase.from("rooms").select("id, name, zone_id, has_trv").eq("home_id", home.id).order("name");
+  const zoneById = Object.fromEntries(zones.map((z) => [z.id, z]));
+  const choices = rooms.filter((r) => zoneById[r.zone_id]).map((r) => ({ room: r, zone: zoneById[r.zone_id], label: r.name }));
+  // zones with no rooms listed are offered whole
+  zones.filter((z) => !rooms.some((r) => r.zone_id == z.id)).forEach((z) => choices.push({ room: null, zone: z, label: z.name }));
+
+  panel.innerHTML = `<section class="card">
+    <h3>Where is it too ${feeling == "cold" ? "cold" : "hot"}?</h3>
+    <div class="row">${choices.map((c, i) => `<button data-choice="${i}">${esc(c.label)}</button>`).join("")}
+      <button class="link" id="feel-cancel">Cancel</button></div>
+    <div class="out"></div>
+  </section>`;
+  document.getElementById("feel-cancel").onclick = () => zonesPage();
+  panel.querySelectorAll("[data-choice]").forEach((b) => {
+    b.onclick = async () => {
+      const c = choices[Number(b.dataset.choice)];
+      const out = panel.querySelector(".out");
+      panel.querySelectorAll("button").forEach((x) => (x.disabled = true));
+      try {
+        out.innerHTML = message("info", await reportComfort(feeling, c.zone, c.room));
+      } catch (error) {
+        out.innerHTML = message("error", fail(error));
+      }
+      setTimeout(zonesPage, 6000);
+    };
+  });
+}
+
+async function reportComfort(feeling, zone, room) {
+  const { data, error } = await supabase.rpc("report_comfort", { p_zone: zone.id, p_room: room?.id ?? null, p_feeling: feeling });
+  if (error) throw error;
+  const where = room ? room.name : zone.name;
+  const temp = data.room_temp == null ? null : Number(data.room_temp);
+  const target = data.target_temp == null ? null : Number(data.target_temp);
+  const scheduled = data.enabled && target != null && target > 5;
+  const notes = [];
+
+  if (feeling == "cold" && !scheduled) {
+    // nothing scheduled now: heat it for an hour
+    const { error: e2 } = await supabase.from("zones").update({ boost_until: new Date(Date.now() + 3600000).toISOString() }).eq("id", zone.id);
+    if (e2) throw e2;
+    notes.push(`${zone.name} isn't scheduled to heat now, so it's on for the next hour.`);
+  } else if (feeling == "hot" && !scheduled) {
+    notes.push(`${zone.name}'s heating is already off. Opening a window or turning down the radiator valve${room ? " in " + room.name : ""} will help.`);
+  } else {
+    notes.push(`${zone.name} will be ${feeling == "cold" ? "warmer" : "cooler"} by ${Math.abs(data.bump)} °C for the next two hours.`);
+    // the zone is where it should be, so the room itself is the problem
+    if (room?.has_trv && temp != null && feeling == "cold" && temp >= target - 0.25) {
+      notes.push(`${zone.name} is already at its target (${fmtTemp(temp)}), so try turning up the radiator valve in ${room.name} as well.`);
+    }
+    if (room?.has_trv && temp != null && feeling == "hot" && temp <= target + 0.25) {
+      notes.push(`${zone.name} is at its target (${fmtTemp(temp)}), so turning down the radiator valve in ${room.name} will help most.`);
+    }
+  }
+  notes.push("Thanks. This helps the heating learn what's comfortable for you.");
+  return notes.join(" ");
+}
+
+// What the controller has learned from feedback, on a zone's page
+function comfortSection(zone, slots) {
+  const preferred = zone.comfort_preferred == null ? null : Number(zone.comfort_preferred);
+  if (preferred == null) return "";
+  const targets = [...new Set(slots.map((s) => Number(s.temp)))];
+  const same = targets.length == 1 && targets[0] == preferred;
+  return `<section class="card">
+    <h3>Comfort</h3>
+    <p>From your feedback (${zone.comfort_reports} reports), you seem comfortable at about <strong>${fmtTemp(preferred)}</strong> here.
+      ${targets.length ? `The schedule aims for ${targets.map(fmtTemp).join(", ")}.` : ""}</p>
+    ${same ? "" : `<button id="use-preferred" data-temp="${preferred}">Use ${fmtTemp(preferred)} for the whole schedule</button>`}
+    <div class="out"></div>
+  </section>`;
 }
 
 // ---------------------------------------------------------------------------
