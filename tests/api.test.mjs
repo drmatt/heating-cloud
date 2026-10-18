@@ -222,3 +222,46 @@ r = await call("GET", "/rest/v1/zones?local_id=eq.1&select=comfort_preferred,com
 ok(Number(r.body[0].comfort_preferred) == 20.5 && r.body[0].comfort_reports == 4, "alice sees the learned preference");
 r = await call("POST", "/rest/v1/rpc/controller_report_comfort", { p_prefs: [] }, alice);
 ok(r.status >= 400, "customers can't set learned preferences");
+
+// ---------------------------------------------------------------------------
+// Sharing a home
+
+const carolEmail = "carol" + Date.now() + "@example.com";
+const carol = await signup(carolEmail);
+r = await call("POST", "/rest/v1/rpc/invite_member", { p_home: home, p_email: carolEmail.toUpperCase() }, alice);
+ok(r.status < 300, "alice invites carol");
+r = await call("POST", "/rest/v1/rpc/invite_member", { p_home: home, p_email: "dave@example.com" }, bob);
+ok(r.status >= 400, "bob can't invite people to alice's home");
+r = await call("POST", "/rest/v1/rpc/invite_member", { p_home: home, p_email: "not-an-email" }, alice);
+ok(r.status >= 400, "invitations need an email address");
+r = await call("POST", "/rest/v1/rpc/my_invites", {}, carol);
+ok(r.body.length == 1 && r.body[0].home_name == "Alice's house", "carol sees her invitation with the home's name");
+const invite = r.body[0].id;
+r = await call("POST", "/rest/v1/rpc/my_invites", {}, bob);
+ok(r.body.length == 0, "bob doesn't see carol's invitation");
+r = await call("POST", "/rest/v1/rpc/accept_invite", { p_invite: invite }, bob);
+ok(r.status >= 400, "bob can't accept carol's invitation");
+r = await call("GET", "/rest/v1/zones?select=id", undefined, carol);
+ok(r.body.length == 0, "carol can't see the home before joining");
+r = await call("POST", "/rest/v1/rpc/accept_invite", { p_invite: invite }, carol);
+ok(r.status == 200 && r.body == home, "carol joins");
+r = await call("GET", "/rest/v1/zones?select=id", undefined, carol);
+ok(r.body.length == 2, "carol sees the zones");
+r = await call("PATCH", "/rest/v1/zones?id=eq." + zones[0].id, { boost_until: new Date(Date.now() + 3600e3).toISOString() }, carol, "return=minimal");
+ok(r.status == 204, "carol can boost the heating");
+r = await call("POST", "/rest/v1/rpc/home_people", { p_home: home }, carol);
+ok(r.body.length == 2 && r.body.some((p) => p.role == "owner") && r.body.some((p) => p.is_you && p.role == "member"), "carol sees who has access");
+r = await call("POST", "/rest/v1/rpc/invite_member", { p_home: home, p_email: "dave@example.com" }, carol);
+ok(r.status >= 400, "members can't invite people");
+const aliceId = (await call("POST", "/rest/v1/rpc/home_people", { p_home: home }, alice)).body.find((p) => p.is_you).user_id;
+r = await call("POST", "/rest/v1/rpc/remove_member", { p_home: home, p_user: aliceId, p_invite: null }, carol);
+ok(r.status >= 400, "members can't remove the owner");
+r = await call("POST", "/rest/v1/rpc/remove_member", { p_home: home, p_user: aliceId, p_invite: null }, alice);
+ok(r.status >= 400, "the owner can't remove themselves");
+r = await call("POST", "/rest/v1/rpc/home_people", { p_home: home }, bob);
+ok(r.body.length == 0, "bob can't list alice's people");
+const carolId = (await call("POST", "/rest/v1/rpc/home_people", { p_home: home }, carol)).body.find((p) => p.is_you).user_id;
+r = await call("POST", "/rest/v1/rpc/remove_member", { p_home: home, p_user: carolId, p_invite: null }, alice);
+ok(r.status < 300, "alice removes carol");
+r = await call("GET", "/rest/v1/zones?select=id", undefined, carol);
+ok(r.body.length == 0, "carol has lost access");

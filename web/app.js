@@ -9,7 +9,7 @@
 //   #/settings         home, controller and account
 
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm";
-import { config } from "./config.js?v=2026101805";
+import { config } from "./config.js?v=2026101806";
 
 const app = document.getElementById("app");
 const topbar = document.getElementById("topbar");
@@ -243,11 +243,17 @@ function newPasswordPage() {
 // ---------------------------------------------------------------------------
 // Claiming a controller
 
-function claimPage() {
+async function claimPage() {
   setNav(null);
   banner.hidden = true;
-  render(`<div class="card narrow">
-    <h1>Connect your controller</h1>
+  const { data: invites } = await supabase.rpc("my_invites");
+  render(`${(invites || []).map((i) => `<div class="card narrow">
+      <h1>You're invited</h1>
+      <p>You've been invited to share the heating at <strong>${esc(i.home_name)}</strong>.</p>
+      <form class="join" data-invite="${i.id}"><div class="out"></div><button class="primary full" type="submit">Join ${esc(i.home_name)}</button></form>
+    </div>`).join("")}
+    <div class="card narrow">
+    <h1>${invites?.length ? "Or connect your own controller" : "Connect your controller"}</h1>
     <p>Plug in your heating controller and connect it to your router. Then enter the code from its label, or from the controller's set-up page.</p>
     <form id="f">
       <label for="code">Controller code</label>
@@ -260,6 +266,17 @@ function claimPage() {
     <p class="small muted"><button class="link" id="signout">Sign out</button></p>
   </div>`);
   document.getElementById("signout").onclick = () => supabase.auth.signOut();
+  app.querySelectorAll("form.join").forEach((join) => {
+    join.onsubmit = (e) => {
+      e.preventDefault();
+      submitting(join, async () => {
+        const { error } = await supabase.rpc("accept_invite", { p_invite: join.dataset.invite });
+        if (error) throw error;
+        await loadHome();
+        go("#/");
+      });
+    };
+  });
   const form = document.getElementById("f");
   form.onsubmit = (e) => {
     e.preventDefault();
@@ -952,6 +969,10 @@ async function settingsPage() {
       </form>
     </section>
     <section class="card">
+      <h3>People</h3>
+      <div id="people"><p class="muted small">Loading…</p></div>
+    </section>
+    <section class="card">
       <h3>Controller</h3>
       ${controller ? `<p>Last online: ${fmtAgo(controller.last_seen_at)}<br>
         <span class="small muted">Software ${esc(controller.software_version || "unknown")}</span></p>` : `<p class="muted">No controller.</p>`}
@@ -1003,6 +1024,50 @@ async function settingsPage() {
   };
 
   document.getElementById("signout").onclick = () => supabase.auth.signOut();
+  peopleSection();
+}
+
+// Who can use this home's heating, and inviting others
+async function peopleSection() {
+  const box = document.getElementById("people");
+  const { data: people, error } = await supabase.rpc("home_people", { p_home: home.id });
+  if (error) return (box.innerHTML = message("error", fail(error)));
+  const isOwner = people.some((p) => p.is_you && p.role == "owner");
+  const label = { owner: "Owner", member: "Can use the heating", invited: "Invited, not joined yet" };
+  box.innerHTML = `<table><tbody>${people.map((p) => `<tr>
+      <td>${esc(p.email)}${p.is_you ? ' <span class="small muted">(you)</span>' : ""}<div class="small muted">${label[p.role] || p.role}</div></td>
+      <td>${isOwner && !p.is_you && p.role != "owner" ? `<button class="link danger" data-remove-user="${p.user_id || ""}" data-remove-invite="${p.invite_id || ""}">${p.invited ? "Cancel" : "Remove"}</button>` : ""}</td>
+    </tr>`).join("")}</tbody></table>
+    ${isOwner ? `<form id="invite" class="row" style="margin-top:12px">
+      <input class="grow" name="email" type="email" placeholder="Their email address" required aria-label="Email address to invite">
+      <button class="primary" type="submit">Invite</button>
+      <div class="out" style="width:100%"></div></form>
+      <p class="small muted">They sign in (or create an account) at ${esc(location.origin + location.pathname)} with that email, and can then control the heating. Only you can invite or remove people.</p>`
+      : `<p class="small muted">Only the owner can invite or remove people.</p>`}`;
+
+  box.querySelectorAll("[data-remove-user]").forEach((b) => {
+    b.onclick = async () => {
+      if (!confirm("Remove their access?")) return;
+      const { error } = await supabase.rpc("remove_member", {
+        p_home: home.id,
+        p_user: b.dataset.removeUser || null,
+        p_invite: b.dataset.removeInvite || null,
+      });
+      if (error) return alert(fail(error));
+      peopleSection();
+    };
+  });
+  const invite = document.getElementById("invite");
+  if (invite) {
+    invite.onsubmit = (e) => {
+      e.preventDefault();
+      submitting(invite, async () => {
+        const { error } = await supabase.rpc("invite_member", { p_home: home.id, p_email: invite.email.value });
+        if (error) throw error;
+        peopleSection();
+      });
+    };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1546,7 +1611,7 @@ async function route_() {
   } catch (error) {
     return render(message("error", fail(error)));
   }
-  if (!home || hash == "#/claim") return home && hash == "#/claim" ? go("#/") : claimPage();
+  if (!home || hash == "#/claim") return home && hash == "#/claim" ? go("#/") : await claimPage();
 
   try {
     if (hash.startsWith("#/zone/")) return await zonePage(hash.slice("#/zone/".length));
