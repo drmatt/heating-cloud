@@ -9,7 +9,7 @@
 //   #/settings         home, controller and account
 
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm";
-import { config } from "./config.js?v=2026101808";
+import { config } from "./config.js?v=2026101809";
 
 const app = document.getElementById("app");
 const topbar = document.getElementById("topbar");
@@ -1343,6 +1343,8 @@ async function budgetPage() {
           <label class="grow">Billing day<input name="day" type="number" min="1" max="28" value="${budget?.start_day ?? 1}" required></label>
           <label class="grow">Boiler size (kW)<input name="kw" type="number" min="4" max="60" step="0.5" value="${budget?.boiler_kw ?? 24}" required></label>
         </div>
+        <label class="switch"><input type="checkbox" name="other" ${budget?.other_gas === false ? "" : "checked"}> We also use gas for cooking or other appliances (such as a gas fire)</label>
+        <p class="small muted">Untick if gas is only used for heating and hot water, so all of it is put down to those.</p>
         <p class="small muted">The lowest each zone may go to stay within budget:</p>
         ${zones.map((z) => `<div class="row"><span class="grow">${esc(z.name)}</span>
           <select data-min="${z.id}" aria-label="Minimum for ${esc(z.name)}">${[5, 10, 12, 14, 15, 16, 17, 18, 19, 20].map((t) =>
@@ -1421,6 +1423,7 @@ async function budgetPage() {
         monthly_pence: Math.round(Number(form.pounds.value) * 100),
         start_day: Number(form.day.value),
         boiler_kw: Number(form.kw.value),
+        other_gas: form.other.checked,
         updated_at: new Date().toISOString(),
       };
       const { error } = await supabase.from("budgets").upsert(fields);
