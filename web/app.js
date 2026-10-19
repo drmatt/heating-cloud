@@ -9,7 +9,7 @@
 //   #/settings         home, controller and account
 
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm";
-import { config } from "./config.js?v=2026101806";
+import { config } from "./config.js?v=2026101807";
 
 const app = document.getElementById("app");
 const topbar = document.getElementById("topbar");
@@ -1470,6 +1470,140 @@ function drawCosts(daily) {
 }
 
 // ---------------------------------------------------------------------------
+// Costs: each month's gas bill split by what it paid for
+
+const COST_COLORS = { standing: "#898781", other: "#e87ba4", hot_water: "#eb6834" };
+const ZONE_COLORS = ["#2a78d6", "#1baf7a", "#eda100", "#6250d6", "#008300", "#e34948"];
+
+function costColor(item) {
+  if (item.key == "zone") return ZONE_COLORS[(item.zone_local_id - 1 + ZONE_COLORS.length) % ZONE_COLORS.length];
+  return COST_COLORS[item.key];
+}
+
+function periodLabel(p, long) {
+  const start = new Date(p.period_start);
+  const end = new Date(new Date(p.period_end) - 86400000);
+  const opts = long ? { day: "numeric", month: "short" } : { month: "short" };
+  return long ? `${start.toLocaleDateString([], opts)} – ${end.toLocaleDateString([], opts)}` : start.toLocaleDateString([], { month: "short", year: "2-digit" });
+}
+
+let costsChart = null;
+
+async function costsPage() {
+  setNav("costs");
+  clearInterval(refreshTimer);
+  const { data: periods, error } = await supabase.from("cost_breakdowns").select("*").eq("home_id", home.id).order("period_start");
+  if (error) return render(message("error", fail(error)));
+  if (!periods.length) {
+    return render(`<h1>Costs</h1><section class="card"><p class="muted">Costs appear here once your controller has gas readings or heating history. Connect Octopus on the Budget page for exact figures.</p></section>`);
+  }
+  const current = periods.find((p) => p.is_current) || periods[periods.length - 1];
+
+  render(`<h1>Costs</h1>
+    <section class="card">
+      <h3>Gas each month</h3>
+      <div class="chart-wrap"><canvas id="months" role="img" aria-label="Gas cost each billing month, split by standing charge, each zone, hot water and other gas"></canvas></div>
+      <p class="small muted">Click a month for its breakdown. The paler block on the current month is the projection for the rest of it.</p>
+    </section>
+    <section class="card" id="month"></section>
+    <p class="small muted">The meter only measures the whole house, so the split between zones is estimated from how long each heated and how much gas an hour of heating uses there. The parts always add up to the metered total.</p>`);
+
+  showMonth(current);
+  drawMonths(periods, (p) => showMonth(p));
+}
+
+function showMonth(p) {
+  const box = document.getElementById("month");
+  const total = p.actual_pence + p.projected_pence;
+  const current = p.is_current;
+  box.innerHTML = `<h3>${periodLabel(p, true)}${current ? " (this month)" : ""}</h3>
+    <p>${current
+      ? `<strong>${pounds(p.actual_pence)}</strong> so far, heading for about <strong>${pounds(total)}</strong> by the end of the month.`
+      : `<strong>${pounds(p.actual_pence)}</strong> in total.`}
+      ${p.estimated_days ? `<span class="small muted">${p.estimated_days} day${p.estimated_days == 1 ? " is" : "s are"} estimated from boiler time.</span>` : ""}</p>
+    <table>
+      <thead><tr><th>For</th>${current ? `<th class="num">So far</th><th class="num hide-small">Rest of month</th>` : ""}<th class="num">${current ? "Month" : "Cost"}</th><th class="num hide-small">Share</th></tr></thead>
+      <tbody>${p.items.map((i) => {
+        const t = i.actual_pence + i.projected_pence;
+        return `<tr><td><span class="swatch" style="background:${costColor(i)}"></span>${esc(i.name)}</td>
+          ${current ? `<td class="num">${pounds(i.actual_pence)}</td><td class="num hide-small">${pounds(i.projected_pence)}</td>` : ""}
+          <td class="num"><strong>${pounds(t)}</strong></td><td class="num hide-small">${total ? Math.round((t / total) * 100) : 0}%</td></tr>`;
+      }).join("")}
+      <tr class="total"><td>Total</td>${current ? `<td class="num">${pounds(p.actual_pence)}</td><td class="num hide-small">${pounds(p.projected_pence)}</td>` : ""}<td class="num"><strong>${pounds(total)}</strong></td><td class="hide-small"></td></tr>
+      </tbody>
+    </table>`;
+}
+
+function drawMonths(periods, onPick) {
+  if (costsChart) costsChart.destroy();
+  const style = getComputedStyle(document.documentElement);
+  const muted = style.getPropertyValue("--muted").trim();
+  const grid = style.getPropertyValue("--border").trim();
+
+  // one dataset per category, in a fixed order, so colours follow the category
+  const keys = [];
+  periods.forEach((p) => p.items.forEach((i) => {
+    const id = i.key + ":" + (i.zone_local_id ?? "");
+    if (!keys.some((k) => k.id == id)) keys.push({ id, item: i });
+  }));
+  const order = { standing: 0, zone: 1, hot_water: 2, other: 3 };
+  keys.sort((a, b) => order[a.item.key] - order[b.item.key] || (a.item.zone_local_id || 0) - (b.item.zone_local_id || 0));
+
+  const datasets = keys.map((k) => ({
+    label: k.item.name,
+    data: periods.map((p) => {
+      const i = p.items.find((x) => x.key + ":" + (x.zone_local_id ?? "") == k.id);
+      return i ? i.actual_pence / 100 : 0;
+    }),
+    backgroundColor: costColor(k.item),
+    borderColor: style.getPropertyValue("--surface").trim() || "#fff",
+    borderWidth: { top: 2 },
+    maxBarThickness: 28,
+    stack: "cost",
+  }));
+  datasets.push({
+    label: "Projected rest of month",
+    data: periods.map((p) => (p.is_current ? p.projected_pence / 100 : 0)),
+    backgroundColor: "rgba(137, 135, 129, 0.25)",
+    borderColor: "#898781",
+    borderWidth: 1,
+    borderDash: [4, 3],
+    maxBarThickness: 28,
+    stack: "cost",
+  });
+
+  costsChart = new Chart(document.getElementById("months"), {
+    type: "bar",
+    data: { labels: periods.map((p) => periodLabel(p) + (p.is_current ? "*" : "")), datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      onClick: (e, elements) => {
+        if (elements.length) onPick(periods[elements[0].index]);
+      },
+      plugins: {
+        legend: { position: "bottom", labels: { color: muted, boxWidth: 10, boxHeight: 10 } },
+        tooltip: {
+          filter: (item) => item.parsed.y > 0,
+          callbacks: {
+            label: (item) => `${item.dataset.label}: £${item.parsed.y.toFixed(2)}`,
+            footer: (items) => {
+              const p = periods[items[0].dataIndex];
+              return `Total £${((p.actual_pence + p.projected_pence) / 100).toFixed(2)}`;
+            },
+          },
+        },
+      },
+      scales: {
+        x: { stacked: true, grid: { display: false }, ticks: { color: muted } },
+        y: { stacked: true, grid: { color: grid }, ticks: { color: muted, callback: (v) => "£" + v } },
+      },
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Your home: rooms and when they're used
 
 // Common times for the manual room form
@@ -1617,6 +1751,7 @@ async function route_() {
     if (hash.startsWith("#/zone/")) return await zonePage(hash.slice("#/zone/".length));
     if (hash == "#/sensors") return await sensorsPage();
     if (hash == "#/budget") return await budgetPage();
+    if (hash == "#/costs") return await costsPage();
     if (hash == "#/home") return await homePage();
     if (hash == "#/settings") return await settingsPage();
     return await zonesPage();
