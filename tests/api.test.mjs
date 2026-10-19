@@ -167,6 +167,24 @@ ok(r.body.budget?.monthly_pence == 9000 && r.body.budget.start_day == 15 && r.bo
 r = await call("GET", "/rest/v1/zones?local_id=eq.1&select=budget_offset", undefined, alice);
 ok(Number(r.body[0].budget_offset) == 1.5, "alice sees the budget offset the controller applied");
 
+// look-ahead: heater type and comfort temperature from the owner, the plan from the controller
+r = await call("PATCH", "/rest/v1/zones?id=eq." + zones[0].id, { heater: "underfloor", comfort_temp: 20.5 }, alice, "return=minimal");
+ok(r.status == 204, "alice says the zone has underfloor heating and sets its comfort temperature");
+r = await call("PATCH", "/rest/v1/zones?id=eq." + zones[0].id, { heater: "storage" }, alice);
+ok(r.status >= 400, "only known kinds of heater");
+r = await call("PATCH", "/rest/v1/zones?id=eq." + zones[0].id, { comfort_temp: 30 }, alice);
+ok(r.status >= 400, "comfort temperature within limits");
+r = await call("PATCH", "/rest/v1/zones?id=eq." + zones[0].id, { plan: { reason: "fake" } }, alice);
+ok(r.status >= 400, "alice can't write the controller's plan");
+r = await call("PATCH", "/rest/v1/zones?id=eq." + zones[0].id, { heater: "radiators" }, bob);
+r = await call("GET", "/rest/v1/zones?local_id=eq.1&select=heater", undefined, alice);
+ok(r.body[0].heater == "underfloor", "bob can't change alice's heater type");
+r = await call("POST", "/rest/v1/rpc/controller_sync", { p_report: Object.assign({}, report2, { zones: report.zones.map((z) => Object.assign({}, z, { plan: { source: "rooms", next_start: 1760000000, slots: [{ day: 1, from: "07:00", to: "09:00", temp: 20.5 }] } })) }) }, ctok);
+const lz = r.body.zones.find((z) => z.local_id == 1);
+ok(lz.heater == "underfloor" && Number(lz.comfort_temp) == 20.5, "controller gets the heater type and comfort temperature");
+r = await call("GET", "/rest/v1/zones?local_id=eq.1&select=plan", undefined, alice);
+ok(r.body[0].plan?.source == "rooms" && r.body[0].plan.slots.length == 1, "alice sees the controller's plan");
+
 r = await call("POST", "/rest/v1/energy_daily?on_conflict=home_id,day", [{ home_id: home, day: "2026-10-16", kwh: 40.5, cost_pence: 347, metered: true }], ctok, "resolution=merge-duplicates,return=minimal");
 ok(r.status == 201, "controller uploads daily energy");
 r = await call("POST", "/rest/v1/energy_daily", [{ home_id: home, day: "2026-10-17", kwh: 1, cost_pence: 1, metered: true }], alice);

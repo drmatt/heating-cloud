@@ -9,7 +9,7 @@
 //   #/settings         home, controller and account
 
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm";
-import { config } from "./config.js?v=2026101910";
+import { config } from "./config.js?v=2026101911";
 
 const app = document.getElementById("app");
 const topbar = document.getElementById("topbar");
@@ -342,6 +342,7 @@ function zoneCard(zone) {
   const nudged = zone.comfort_bump_until && Date.parse(zone.comfort_bump_until) > Date.now() && Number(zone.comfort_bump)
     ? ` <span class="pill">${Number(zone.comfort_bump) > 0 ? "Warmer" : "Cooler"} until ${fmtTime(zone.comfort_bump_until)}</span>` : "";
   const target = zone.is_enabled && zone.desired_temp > 5 ? `<span class="muted small">Target ${fmtTemp(zone.desired_temp)}${lowered}${nudged}</span>` : "";
+  const plan = zone.is_enabled ? planLine(zone) : "";
 
   return `<article class="card zone ${zone.is_enabled ? "" : "disabled"}">
     <div class="zone-head">
@@ -350,8 +351,9 @@ function zoneCard(zone) {
     </div>
     <div class="temp">${zone.current_temp == null ? `<small>No reading</small>` : fmtTemp(zone.current_temp)}</div>
     ${target}
+    ${plan ? `<span class="muted small">${esc(plan)}</span>` : ""}
     <div class="row">
-      <label class="switch"><input type="checkbox" data-enable="${zone.id}" ${zone.is_enabled ? "checked" : ""}> Schedule on</label>
+      <label class="switch"><input type="checkbox" data-enable="${zone.id}" ${zone.is_enabled ? "checked" : ""}> Heating on</label>
       <span class="grow"></span>
       ${
         boosted
@@ -361,6 +363,64 @@ function zoneCard(zone) {
       }
     </div>
   </article>`;
+}
+
+const HEATERS = { radiators: "Radiators", underfloor: "Underfloor heating", unknown: "Not sure" };
+const unixTime = (t) => fmtTime(new Date(t * 1000).toISOString());
+
+// With eco, what the controller is doing about the next warm period
+function planLine(zone) {
+  const p = zone.eco_enabled && zone.plan;
+  if (!p || !p.next_period) return "";
+  const by = unixTime(p.next_period);
+  if (zone.is_on && p.reason == "preheat") return `Warming up for ${by}`;
+  if (!zone.is_on && p.next_start && p.next_start * 1000 > Date.now() && p.next_start < p.next_period)
+    return `Starts about ${unixTime(p.next_start)} to be warm by ${by}`;
+  return "";
+}
+
+// Weekly warm periods [{day, from, to, temp}] in a few lines, with days
+// that are the same grouped: "Mon–Fri 07:00–09:00, 17:00–22:30 at 20°"
+function describeWarm(slots) {
+  const short = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const byDay = [1, 2, 3, 4, 5, 6, 0].map((d) => ({
+    d,
+    text: slots.filter((s) => s.day == d).map((s) => `${s.from}–${s.to == "24:00" ? "midnight" : s.to}${s.temp ? " at " + fmtTemp(s.temp) : ""}`).join(", "),
+  }));
+  const lines = [];
+  byDay.forEach((x) => {
+    const last = lines[lines.length - 1];
+    if (last && last.text == x.text) last.to = x.d;
+    else lines.push({ from: x.d, to: x.d, text: x.text });
+  });
+  return lines.map((l) => `<li>${l.from == l.to ? short[l.from] : short[l.from] + "–" + short[l.to]}: ${esc(l.text || "not heated")}</li>`).join("");
+}
+
+// Asked once per zone with a sensor: what heats it, so look-ahead control
+// can plan before it has learned the zone
+function heaterQuestion(zones, sensorZoneIds) {
+  const ask = zones.filter((z) => sensorZoneIds.has(z.id) && !z.heater);
+  if (!ask.length) return "";
+  return `<section class="card advice">
+    <h3>How is each zone heated?</h3>
+    <p class="small muted">Underfloor heating takes hours to warm up, radiators minutes. Knowing which helps the controller have rooms warm on time from the start; it learns the details as it goes.</p>
+    ${ask.map((z) => `<div class="row"><span class="grow">${esc(z.name)}</span>
+      <select data-heater="${z.id}" aria-label="How ${esc(z.name)} is heated" style="max-width:220px">
+        <option value="">Choose…</option>
+        ${Object.entries(HEATERS).map(([v, label]) => `<option value="${v}">${label}</option>`).join("")}
+      </select></div>`).join("")}
+  </section>`;
+}
+
+function bindHeaterSelects(onSaved) {
+  app.querySelectorAll("[data-heater]").forEach((select) => {
+    select.onchange = async () => {
+      if (!select.value) return;
+      const { error } = await supabase.from("zones").update({ heater: select.value }).eq("id", select.dataset.heater);
+      if (error) return alert(fail(error));
+      onSaved();
+    };
+  });
 }
 
 // Weather-adjusted energy figures. Before eco is switched on, fit
@@ -458,9 +518,13 @@ async function zonesPage() {
     </div>
     <div id="feel-panel"></div>
     <h1>Zones</h1>
+    ${heaterQuestion(zones, zoneIdsWithSensors)}
     ${budgetCard(money.budget, money.plan, true)}
     <div class="zones">${zones.map(zoneCard).join("")}</div>
     ${energyCard(energySummary(daily || [], sensorZones))}`);
+
+  bindHeaterSelects(zonesPage);
+  app.querySelectorAll("[data-heater]").forEach((select) => (select.onfocus = () => clearInterval(refreshTimer)));
 
   app.querySelectorAll("[data-feel]").forEach((button) => {
     button.onclick = () => {
@@ -537,6 +601,10 @@ async function zonePage(zoneId) {
         .gte("time", since).order("time").limit(5000)
     : { data: [] };
 
+  // with eco, a zone with a sensor is warm when its rooms are used, and the
+  // controller decides when to heat; the boiler schedule isn't shown
+  const roomBased = zone.eco_enabled && ids.length > 0;
+
   render(`<p class="small"><a href="#/">← Zones</a></p>
     <h1>${esc(zone.name)}</h1>
     <section class="card">
@@ -545,12 +613,12 @@ async function zonePage(zoneId) {
         : `<p class="muted">No sensors in this zone. Add one on the <a href="#/sensors">Sensors</a> page.</p>`}
     </section>
     ${ids.length ? ecoSection(zone) : ""}
-    ${comfortSection(zone, slots)}
+    ${comfortSection(zone, slots, roomBased)}
     ${daily.length ? `<section class="card">
       <h3>Heating time, last 30 days</h3>
       <div class="chart-wrap short"><canvas id="daily" role="img" aria-label="Hours of heating each day in ${esc(zone.name)} over the last 30 days"></canvas></div>
     </section>` : ""}
-    <section class="card">
+    ${roomBased ? warmSection(zone, slots) : `<section class="card">
       <h3>Schedule</h3>
       <p class="small muted">The heating comes on in these periods when the room is below the temperature you set.</p>
       <form id="schedule">
@@ -559,16 +627,22 @@ async function zonePage(zoneId) {
         <div class="row"><button class="primary" type="submit">Save schedule</button>
           <button type="button" id="copy">Copy Monday to weekdays</button></div>
       </form>
-    </section>`);
+    </section>`}`);
 
   if (ids.length) drawChart(sensors, readings, events, since);
   if (daily.length) drawDaily(daily);
   if (ids.length) bindEco(zone);
-  scheduleEditor(zone, slots);
+  if (roomBased) bindWarm(zone);
+  else scheduleEditor(zone, slots);
 
   document.getElementById("use-preferred")?.addEventListener("click", async (e) => {
     const temp = Number(e.target.dataset.temp);
     e.target.disabled = true;
+    if (roomBased) {
+      const { error } = await supabase.from("zones").update({ comfort_temp: temp }).eq("id", zone.id);
+      if (error) return alert(fail(error));
+      return zonePage(zone.id);
+    }
     const { error } = await supabase.rpc("set_zone_schedule", {
       p_zone: zone.id,
       p_slots: slots.map((s) => ({ day: s.day, on_time: s.on_time.slice(0, 5), off_time: s.off_time.slice(0, 5), temp })),
@@ -579,10 +653,14 @@ async function zonePage(zoneId) {
 }
 
 // What the controller has learned about the room, in plain words
-function learnedText(model) {
+function learnedText(model, plan) {
   if (!model) return "Still learning how this room heats and cools. This takes a week or two of heating.";
   const parts = [];
-  if (model.h) parts.push(`warms about ${Number(model.h).toFixed(1)} °C an hour with the heating on`);
+  if (plan && plan.warm_up_hours) {
+    const learned = plan.learned >= 0.5 ? "" : " (typical figures until it has learned more)";
+    parts.push(`takes about ${hoursText(plan.warm_up_hours)} to warm by 2 °C from cold, and keeps warming about ${Number(plan.carry_on).toFixed(1)} °C after the boiler stops${learned}`);
+  }
+  else if (model.h) parts.push(`warms about ${Number(model.h).toFixed(1)} °C an hour with the heating on`);
   if (model.k) parts.push(`loses about ${(model.k * 15).toFixed(1)} °C an hour when it's 5 °C outside`);
   if (model.overshoot) parts.push(`keeps warming about ${Number(model.overshoot).toFixed(1)} °C after the boiler switches off`);
   let text = parts.length ? "This room " + parts.join(", ") + "." : "";
@@ -599,16 +677,64 @@ function learnedText(model) {
   return text;
 }
 
+function hoursText(h) {
+  h = Number(h);
+  if (h < 1) return Math.round(h * 60) + " minutes";
+  const half = Math.round(h * 2) / 2;
+  return (half == 1 ? "an hour" : half + " hours");
+}
+
+// Eco: when the zone is warm, from the rooms on the Your home page
+function warmSection(zone, scheduleSlots) {
+  const p = zone.plan || {};
+  const slots = p.slots || [];
+  const temps = scheduleSlots.map((s) => Number(s.temp));
+  const comfort = zone.comfort_temp != null ? Number(zone.comfort_temp) : temps.length ? Math.max(...temps) : 20;
+  const options = [];
+  for (let t = 16; t <= 23; t += 0.5) options.push(t);
+  const source = {
+    rooms: "From when you use its rooms. Change them on the <a href=\"#/home\">Your home</a> page.",
+    minimum: `Its rooms are rarely used, so it's kept at its minimum (${fmtTemp(zone.min_temp)}). Add times on the <a href="#/home">Your home</a> page for when you'll use them.`,
+    schedule: "No room times yet, so it follows its old schedule. Tell us when its rooms are used on the <a href=\"#/home\">Your home</a> page.",
+  }[p.source] || "Waiting for the controller.";
+  const next = planLine(zone);
+  return `<section class="card">
+    <h3>When it's warm</h3>
+    <p class="small">${source}</p>
+    ${slots.length ? `<ul class="small">${describeWarm(slots)}</ul>` : ""}
+    ${next ? `<p class="small">${esc(next)}.</p>` : ""}
+    <label for="comfort-temp">Temperature when the rooms are in use</label>
+    <select id="comfort-temp" style="max-width:200px">${options
+      .map((t) => `<option value="${t}" ${t == comfort ? "selected" : ""}>${t.toFixed(1)} °C</option>`).join("")}</select>
+    <p class="small muted">It aims to be within your comfort margin of this when each period starts, starting up to 6 hours early for slow heating.</p>
+  </section>`;
+}
+
+function bindWarm(zone) {
+  document.getElementById("comfort-temp").onchange = async (e) => {
+    const { error } = await supabase.from("zones").update({ comfort_temp: Number(e.target.value) }).eq("id", zone.id);
+    if (error) alert(fail(error));
+  };
+}
+
 function ecoSection(zone) {
   const margins = [0, 0.5, 1, 1.5, 2];
   return `<section class="card">
     <h3>Energy saving</h3>
-    <label class="switch"><input type="checkbox" id="eco" ${zone.eco_enabled ? "checked" : ""}> Eco: learn this room and run the boiler less</label>
+    <label class="switch"><input type="checkbox" id="eco" ${zone.eco_enabled ? "checked" : ""}> Eco: heat for when the rooms are used, and learn when to start and stop</label>
+    <p class="small muted">${zone.eco_enabled
+      ? "The controller decides when the boiler runs, so the rooms are warm when you use them."
+      : "Off: the boiler runs during the schedule below, like a normal programmer."}</p>
+    <label for="heater">What heats this zone</label>
+    <select id="heater" style="max-width:220px">
+      ${zone.heater ? "" : `<option value="">Choose…</option>`}
+      ${Object.entries(HEATERS).map(([v, label]) => `<option value="${v}" ${zone.heater == v ? "selected" : ""}>${label}</option>`).join("")}
+    </select>
     <label for="margin">Let the room drift below the target by up to</label>
     <select id="margin" style="max-width:200px">${margins
       .map((m) => `<option value="${m}" ${Number(zone.comfort_margin) == m ? "selected" : ""}>${m == 0 ? "Never below target" : m + " °C"}</option>`)
       .join("")}</select>
-    <p class="small muted">${esc(learnedText(zone.model))}</p>
+    <p class="small muted">${esc(learnedText(zone.model, zone.plan))}</p>
     ${zone.is_enabled ? "" : `<p class="small muted">This zone is switched off. Its sensors check in once a day to save battery; press a sensor's button to wake it straight away.</p>`}
     <div class="out"></div>
   </section>`;
@@ -619,7 +745,11 @@ function bindEco(zone) {
     const { error } = await supabase.from("zones").update(fields).eq("id", zone.id);
     if (error) alert(fail(error));
   };
-  document.getElementById("eco").onchange = (e) => save({ eco_enabled: e.target.checked });
+  document.getElementById("eco").onchange = async (e) => {
+    await save({ eco_enabled: e.target.checked });
+    zonePage(zone.id);
+  };
+  document.getElementById("heater").onchange = (e) => e.target.value && save({ heater: e.target.value });
   document.getElementById("margin").onchange = (e) => save({ comfort_margin: Number(e.target.value) });
 }
 
@@ -1182,16 +1312,18 @@ async function reportComfort(feeling, zone, room) {
 }
 
 // What the controller has learned from feedback, on a zone's page
-function comfortSection(zone, slots) {
+function comfortSection(zone, slots, roomBased) {
   const preferred = zone.comfort_preferred == null ? null : Number(zone.comfort_preferred);
   if (preferred == null) return "";
-  const targets = [...new Set(slots.map((s) => Number(s.temp)))];
+  const targets = roomBased
+    ? [zone.comfort_temp != null ? Number(zone.comfort_temp) : Math.max(...slots.map((s) => Number(s.temp)), 20)]
+    : [...new Set(slots.map((s) => Number(s.temp)))];
   const same = targets.length == 1 && targets[0] == preferred;
   return `<section class="card">
     <h3>Comfort</h3>
     <p>From your feedback (${zone.comfort_reports} reports), you seem comfortable at about <strong>${fmtTemp(preferred)}</strong> here.
-      ${targets.length ? `The schedule aims for ${targets.map(fmtTemp).join(", ")}.` : ""}</p>
-    ${same ? "" : `<button id="use-preferred" data-temp="${preferred}">Use ${fmtTemp(preferred)} for the whole schedule</button>`}
+      ${targets.length ? `${roomBased ? "It aims for" : "The schedule aims for"} ${targets.map(fmtTemp).join(", ")}.` : ""}</p>
+    ${same ? "" : `<button id="use-preferred" data-temp="${preferred}">Use ${fmtTemp(preferred)}${roomBased ? "" : " for the whole schedule"}</button>`}
     <div class="out"></div>
   </section>`;
 }
