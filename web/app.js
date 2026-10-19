@@ -9,7 +9,7 @@
 //   #/settings         home, controller and account
 
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm";
-import { config } from "./config.js?v=2026101911";
+import { config } from "./config.js?v=2026101912";
 
 const app = document.getElementById("app");
 const topbar = document.getElementById("topbar");
@@ -368,7 +368,7 @@ function zoneCard(zone) {
 const HEATERS = { radiators: "Radiators", underfloor: "Underfloor heating", unknown: "Not sure" };
 const unixTime = (t) => fmtTime(new Date(t * 1000).toISOString());
 
-// With eco, what the controller is doing about the next warm period
+// In intelligent mode, what the controller is doing about the next warm period
 function planLine(zone) {
   const p = zone.eco_enabled && zone.plan;
   if (!p || !p.next_period) return "";
@@ -423,7 +423,7 @@ function bindHeaterSelects(onSaved) {
   });
 }
 
-// Weather-adjusted energy figures. Before eco is switched on, fit
+// Weather-adjusted energy figures. Before intelligent mode is switched on, fit
 // heating minutes = a + b × heating degree days on days the heating ran;
 // afterwards compare the last 7 days with what that baseline expects.
 function energySummary(daily, sensorZones) {
@@ -461,11 +461,11 @@ function energyCard(e) {
   let text = `<strong>${e.actual.toFixed(1)} h</strong> of heating in the last 7 days.`;
   if (e.expected != null && e.expected > 0) {
     const change = Math.round((1 - e.actual / e.expected) * 100);
-    text += ` For this weather you'd usually expect about ${e.expected.toFixed(1)} h, so eco saved an estimated
+    text += ` For this weather you'd usually expect about ${e.expected.toFixed(1)} h, so intelligent heating saved an estimated
       <strong>${change > 0 ? change + "%" : "nothing yet"}</strong>.
-      <span class="small muted">Based on ${e.baseDays} days before eco was switched on. An estimate, not a meter reading.</span>`;
+      <span class="small muted">Based on ${e.baseDays} days before intelligent heating was switched on. An estimate, not a meter reading.</span>`;
   } else if (!e.ecoStart) {
-    text += ` <span class="small muted">Switch on eco for a zone to start saving; savings show here once it has run for a few days.</span>`;
+    text += ` <span class="small muted">Switch on intelligent heating for a zone to start saving; savings show here once it has run for a few days.</span>`;
   } else {
     text += ` <span class="small muted">Savings appear once there's enough history to compare with.</span>`;
   }
@@ -601,7 +601,7 @@ async function zonePage(zoneId) {
         .gte("time", since).order("time").limit(5000)
     : { data: [] };
 
-  // with eco, a zone with a sensor is warm when its rooms are used, and the
+  // in intelligent mode, a zone with a sensor is warm when its rooms are used, and the
   // controller decides when to heat; the boiler schedule isn't shown
   const roomBased = zone.eco_enabled && ids.length > 0;
 
@@ -672,7 +672,7 @@ function learnedText(model, plan) {
       ? ` Its windows seem to face ${facing}: bright sun on them warms it by about ${lift.toFixed(1)} °C an hour, so the heating does less on sunny days.`
       : " The sun makes little difference here.";
   }
-  if (!model.ready) text += " Still learning: eco uses the normal rules until it's confident.";
+  if (!model.ready) text += " Still learning: until it's confident it uses typical figures for this kind of heating.";
   else if (model.stale) text += " Learned last heating season.";
   return text;
 }
@@ -684,7 +684,7 @@ function hoursText(h) {
   return (half == 1 ? "an hour" : half + " hours");
 }
 
-// Eco: when the zone is warm, from the rooms on the Your home page
+// Intelligent mode: when the zone is warm, from the rooms on the Your home page
 function warmSection(zone, scheduleSlots) {
   const p = zone.plan || {};
   const slots = p.slots || [];
@@ -720,8 +720,8 @@ function bindWarm(zone) {
 function ecoSection(zone) {
   const margins = [0, 0.5, 1, 1.5, 2];
   return `<section class="card">
-    <h3>Energy saving</h3>
-    <label class="switch"><input type="checkbox" id="eco" ${zone.eco_enabled ? "checked" : ""}> Eco: heat for when the rooms are used, and learn when to start and stop</label>
+    <h3>Intelligent heating</h3>
+    <label class="switch"><input type="checkbox" id="eco" ${zone.eco_enabled ? "checked" : ""}> Intelligent: heat for when the rooms are used, and learn when to start and stop</label>
     <p class="small muted">${zone.eco_enabled
       ? "The controller decides when the boiler runs, so the rooms are warm when you use them."
       : "Off: the boiler runs during the schedule below, like a normal programmer."}</p>

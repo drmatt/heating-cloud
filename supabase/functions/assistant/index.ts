@@ -78,7 +78,7 @@ const proposeRooms: Anthropic.Tool = {
 };
 
 const GUIDE = `You are the assistant for a home heating controller sold to UK households. You help the owner keep warm within their monthly budget.
-How the system works: the house is split into heating zones (usually floors), each with a temperature sensor, a schedule and a target. A planner on the controller keeps the month within budget by switching on "eco" (learned control that uses less boiler time), lowering targets in 0.5 °C steps (rarely used zones first, never below each zone's minimum temperature), and suggesting shorter heating periods or less hot water for the owner to approve. Rooms within a zone can only be controlled with their radiator valves (TRVs): about 1 = 12 °C, 2 = 15 °C, 3 = 18 °C, 4 = 21 °C, 5 = 24 °C, * = frost only.
+How the system works: the house is split into heating zones (usually floors), each with a temperature sensor, a schedule and a target. A planner on the controller keeps the month within budget by switching on "intelligent heating" (learned control that decides when to start and stop the boiler, hours ahead for slow underfloor heating; when the owner switches it on for a zone, the zone is also warm when its rooms are used instead of following a fixed schedule), lowering targets in 0.5 °C steps (rarely used zones first, never below each zone's minimum temperature), and suggesting shorter heating periods or less hot water for the owner to approve. Rooms within a zone can only be controlled with their radiator valves (TRVs): about 1 = 12 °C, 2 = 15 °C, 3 = 18 °C, 4 = 21 °C, 5 = 24 °C, * = frost only.
 Money is in pounds and pence. Figures marked estimated come from boiler time rather than the gas meter. Be warm, brief and practical; use plain words, short paragraphs, no jargon, no markdown headings. Never invent numbers that aren't in the data. You can't change settings yourself; say what the owner can do on the dashboard.`;
 
 const MODE_GUIDE: Record<Mode, string> = {
@@ -108,7 +108,7 @@ async function homeContext(db: ReturnType<typeof createClient>, homeId: string) 
       local_id: z.local_id,
       name: z.name,
       switched_on: z.is_enabled,
-      eco: z.eco_enabled,
+      intelligent: z.eco_enabled,
       minimum_temp: z.min_temp,
       budget_lowered_by: z.budget_offset,
       current_temp: z.current_temp,
