@@ -9,7 +9,7 @@
 //   #/settings         home, controller and account
 
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm";
-import { config } from "./config.js?v=2026101809";
+import { config } from "./config.js?v=2026101910";
 
 const app = document.getElementById("app");
 const topbar = document.getElementById("topbar");
@@ -586,6 +586,14 @@ function learnedText(model) {
   if (model.k) parts.push(`loses about ${(model.k * 15).toFixed(1)} °C an hour when it's 5 °C outside`);
   if (model.overshoot) parts.push(`keeps warming about ${Number(model.overshoot).toFixed(1)} °C after the boiler switches off`);
   let text = parts.length ? "This room " + parts.join(", ") + "." : "";
+  // 0.5 kW/m² is bright winter sunshine on a wall facing the sun
+  if (model.usedSun) {
+    const lift = Number(model.sun || 0) * 0.5;
+    const facing = ["north", "north-east", "east", "south-east", "south", "south-west", "west", "north-west"][Math.round(Number(model.facing) / 45)];
+    text += lift >= 0.1 && model.facing != null
+      ? ` Its windows seem to face ${facing}: bright sun on them warms it by about ${lift.toFixed(1)} °C an hour, so the heating does less on sunny days.`
+      : " The sun makes little difference here.";
+  }
   if (!model.ready) text += " Still learning: eco uses the normal rules until it's confident.";
   else if (model.stale) text += " Learned last heating season.";
   return text;
