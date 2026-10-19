@@ -9,7 +9,7 @@
 //   #/settings         home, controller and account
 
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm";
-import { config } from "./config.js?v=2026101807";
+import { config } from "./config.js?v=2026101808";
 
 const app = document.getElementById("app");
 const topbar = document.getElementById("topbar");
@@ -26,7 +26,46 @@ const supabase = createClient(config.supabaseUrl, config.supabaseKey);
 const DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const DAY_ORDER = [1, 2, 3, 4, 5, 6, 0]; // show Monday first; the controller counts from Sunday
 const ONLINE_WITHIN_MS = 2 * 60 * 1000;
-const SERIES = ["#2a78d6", "#1baf7a", "#eda100", "#6250d6", "#e87ba4"];
+// Colour-blind-safe colours (Okabe-Ito), checked with the palette validator.
+// Charts also use patterns, so no two series differ by colour alone.
+const SERIES = ["#0072b2", "#e69f00", "#009e73", "#cc79a7", "#56b4e9"];
+
+// Patterns drawn over a colour, for charts (canvas) and swatches (CSS)
+const PATTERNS = ["solid", "diagonal", "dots", "cross", "horizontal", "vertical", "back-diagonal"];
+
+function chartPattern(color, kind) {
+  if (kind == "solid") return color;
+  const c = document.createElement("canvas");
+  c.width = c.height = 10;
+  const g = c.getContext("2d");
+  g.fillStyle = color;
+  g.fillRect(0, 0, 10, 10);
+  g.strokeStyle = "rgba(255,255,255,0.85)";
+  g.fillStyle = "rgba(255,255,255,0.85)";
+  g.lineWidth = 2;
+  const line = (x1, y1, x2, y2) => { g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2); g.stroke(); };
+  if (kind == "diagonal") { line(0, 10, 10, 0); line(-5, 5, 5, -5); line(5, 15, 15, 5); }
+  if (kind == "back-diagonal") { line(0, 0, 10, 10); line(-5, 5, 5, 15); line(5, -5, 15, 5); }
+  if (kind == "cross") { line(0, 10, 10, 0); line(0, 0, 10, 10); }
+  if (kind == "horizontal") line(0, 5, 10, 5);
+  if (kind == "vertical") line(5, 0, 5, 10);
+  if (kind == "dots") { g.beginPath(); g.arc(5, 5, 1.8, 0, Math.PI * 2); g.fill(); }
+  return g.createPattern(c, "repeat");
+}
+
+function swatchStyle(color, kind) {
+  const w = "rgba(255,255,255,0.85)";
+  const patterns = {
+    solid: "",
+    diagonal: `repeating-linear-gradient(-45deg, ${w} 0 2px, transparent 2px 5px),`,
+    "back-diagonal": `repeating-linear-gradient(45deg, ${w} 0 2px, transparent 2px 5px),`,
+    cross: `repeating-linear-gradient(45deg, ${w} 0 1.5px, transparent 1.5px 5px), repeating-linear-gradient(-45deg, ${w} 0 1.5px, transparent 1.5px 5px),`,
+    horizontal: `repeating-linear-gradient(0deg, ${w} 0 2px, transparent 2px 5px),`,
+    vertical: `repeating-linear-gradient(90deg, ${w} 0 2px, transparent 2px 5px),`,
+    dots: `radial-gradient(${w} 1.2px, transparent 1.6px) 0 0 / 5px 5px,`,
+  };
+  return `background: ${patterns[kind] || ""} ${color};`;
+}
 
 let session = null;
 let home = null; // { id, name }
@@ -634,6 +673,7 @@ function drawChart(sensors, readings, events, since) {
     borderColor: SERIES[i % SERIES.length],
     backgroundColor: SERIES[i % SERIES.length],
     borderWidth: 2,
+    borderDash: [[], [6, 3], [2, 2], [8, 3, 2, 3]][i % 4],
     pointRadius: 0,
     stepped: "before",
     yAxisID: "y",
@@ -658,7 +698,7 @@ function drawChart(sensors, readings, events, since) {
     borderWidth: 0,
     pointRadius: 0,
     fill: "origin",
-    backgroundColor: heat + "33",
+    backgroundColor: chartPattern(heat + "55", "diagonal"),
     yAxisID: "heat",
   });
 
@@ -1288,7 +1328,8 @@ async function budgetPage() {
       ${plan.trv_advice.length ? `<p class="small muted">Radiator valves:</p><ul>${plan.trv_advice.map((t) => `<li>${esc(t.text)}</li>`).join("")}</ul>` : ""}
     </section>` : ""}
     ${daily.length ? `<section class="card"><h3>Daily cost this month</h3>
-      <div class="chart-wrap short"><canvas id="costs" role="img" aria-label="Gas cost each day this billing month"></canvas></div></section>` : ""}
+      <div class="chart-wrap short"><canvas id="costs" role="img" aria-label="Gas cost each day this billing month"></canvas></div>
+      <p class="small muted">Striped bars are estimated from boiler time; solid bars are from your meter.</p></section>` : ""}
     ${accuracyCard(acc?.summary, zones)}
     <section class="card">
       <h3>Ask about your heating</h3>
@@ -1445,7 +1486,7 @@ function drawCosts(daily) {
       datasets: [{
         label: "Cost",
         data: daily.map((d) => d.cost_pence / 100),
-        backgroundColor: daily.map((d) => (d.metered ? SERIES[0] : SERIES[0] + "66")),
+        backgroundColor: daily.map((d) => (d.metered ? SERIES[0] : chartPattern(SERIES[0] + "99", "diagonal"))),
         borderRadius: 4,
         maxBarThickness: 18,
       }],
@@ -1472,12 +1513,26 @@ function drawCosts(daily) {
 // ---------------------------------------------------------------------------
 // Costs: each month's gas bill split by what it paid for
 
-const COST_COLORS = { standing: "#898781", other: "#e87ba4", hot_water: "#eb6834" };
-const ZONE_COLORS = ["#2a78d6", "#1baf7a", "#eda100", "#6250d6", "#008300", "#e34948"];
+// colour and pattern per category, fixed so each keeps its look every month
+const COST_STYLES = {
+  standing: { color: "#898781", pattern: "solid" },
+  hot_water: { color: "#d55e00", pattern: "vertical" },
+  other: { color: "#56b4e9", pattern: "back-diagonal" },
+};
+const ZONE_STYLES = [
+  { color: "#0072b2", pattern: "diagonal" },
+  { color: "#e69f00", pattern: "dots" },
+  { color: "#009e73", pattern: "cross" },
+  { color: "#cc79a7", pattern: "horizontal" },
+];
+
+function costStyle(item) {
+  if (item.key == "zone") return ZONE_STYLES[(((item.zone_local_id - 1) % ZONE_STYLES.length) + ZONE_STYLES.length) % ZONE_STYLES.length];
+  return COST_STYLES[item.key];
+}
 
 function costColor(item) {
-  if (item.key == "zone") return ZONE_COLORS[(item.zone_local_id - 1 + ZONE_COLORS.length) % ZONE_COLORS.length];
-  return COST_COLORS[item.key];
+  return costStyle(item).color;
 }
 
 function periodLabel(p, long) {
@@ -1525,7 +1580,8 @@ function showMonth(p) {
       <thead><tr><th>For</th>${current ? `<th class="num">So far</th><th class="num hide-small">Rest of month</th>` : ""}<th class="num">${current ? "Month" : "Cost"}</th><th class="num hide-small">Share</th></tr></thead>
       <tbody>${p.items.map((i) => {
         const t = i.actual_pence + i.projected_pence;
-        return `<tr><td><span class="swatch" style="background:${costColor(i)}"></span>${esc(i.name)}</td>
+        const st = costStyle(i);
+        return `<tr><td><span class="swatch" style="${swatchStyle(st.color, st.pattern)}"></span>${esc(i.name)}</td>
           ${current ? `<td class="num">${pounds(i.actual_pence)}</td><td class="num hide-small">${pounds(i.projected_pence)}</td>` : ""}
           <td class="num"><strong>${pounds(t)}</strong></td><td class="num hide-small">${total ? Math.round((t / total) * 100) : 0}%</td></tr>`;
       }).join("")}
@@ -1555,7 +1611,7 @@ function drawMonths(periods, onPick) {
       const i = p.items.find((x) => x.key + ":" + (x.zone_local_id ?? "") == k.id);
       return i ? i.actual_pence / 100 : 0;
     }),
-    backgroundColor: costColor(k.item),
+    backgroundColor: chartPattern(costStyle(k.item).color, costStyle(k.item).pattern),
     borderColor: style.getPropertyValue("--surface").trim() || "#fff",
     borderWidth: { top: 2 },
     maxBarThickness: 28,
