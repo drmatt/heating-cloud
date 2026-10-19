@@ -9,7 +9,7 @@
 //   #/settings         home, controller and account
 
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm";
-import { config } from "./config.js?v=2026101912";
+import { config } from "./config.js?v=2026101913";
 
 const app = document.getElementById("app");
 const topbar = document.getElementById("topbar");
@@ -333,25 +333,57 @@ async function claimPage() {
 
 const flame = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2c1 4 6 6 6 12a6 6 0 0 1-12 0c0-3 2-5 3-7 1 2 1 3 3 4 0-3-1-6 0-9z"/></svg>`;
 
-function zoneCard(zone) {
+// How a zone is controlled, as a small label
+function modePill(zone, hasSensor) {
+  if (!hasSensor) return `<span class="pill">Timer</span>`;
+  return zone.eco_enabled ? `<span class="pill smart">Intelligent</span>` : `<span class="pill">Programmer</span>`;
+}
+
+// Today's warm (or heating) times for a zone, as "07:00–09:00, 17:00–22:30"
+function todayTimes(zone, intelligent, scheduleSlots) {
+  const today = new Date().getDay();
+  const slots = intelligent
+    ? (zone.plan?.slots || []).filter((s) => s.day == today).map((s) => [s.from, s.to])
+    : scheduleSlots.filter((s) => s.day == today).map((s) => [s.on_time.slice(0, 5), s.off_time.slice(0, 5)]);
+  return slots.map(([a, b]) => `${a}–${b == "24:00" ? "midnight" : b}`).join(", ");
+}
+
+// info: { hasSensor, rooms: [names], slots: this zone's schedule slots }
+function zoneCard(zone, info) {
   const boosted = zone.boost_until && Date.parse(zone.boost_until) > Date.now();
+  const intelligent = zone.eco_enabled && info.hasSensor;
+  const warming = zone.is_on && intelligent && zone.plan?.reason == "preheat";
   const status = zone.is_on
-    ? `<span class="pill heat">${flame}Heating</span>`
+    ? `<span class="pill heat">${flame}${warming ? "Warming up" : "Heating"}</span>`
     : `<span class="pill">Off</span>`;
   const lowered = Number(zone.budget_offset) > 0 ? ` <span class="pill">Budget −${Number(zone.budget_offset)}°</span>` : "";
   const nudged = zone.comfort_bump_until && Date.parse(zone.comfort_bump_until) > Date.now() && Number(zone.comfort_bump)
     ? ` <span class="pill">${Number(zone.comfort_bump) > 0 ? "Warmer" : "Cooler"} until ${fmtTime(zone.comfort_bump_until)}</span>` : "";
   const target = zone.is_enabled && zone.desired_temp > 5 ? `<span class="muted small">Target ${fmtTemp(zone.desired_temp)}${lowered}${nudged}</span>` : "";
   const plan = zone.is_enabled ? planLine(zone) : "";
+  const times = zone.is_enabled ? todayTimes(zone, intelligent, info.slots) : "";
+  const when = !zone.is_enabled ? "Switched off"
+    : times ? `${intelligent ? "Warm today" : info.hasSensor ? "Heating today" : "On today"} ${times}`
+    : "Not heated today";
+  const rooms = info.hasSensor
+    ? info.rooms.length
+      ? `<a class="small" href="#/rooms">${esc(info.rooms.join(", "))}</a>`
+      : intelligent ? `<a class="small" href="#/rooms">Add its rooms</a>` : ""
+    : "";
 
   return `<article class="card zone ${zone.is_enabled ? "" : "disabled"}">
     <div class="zone-head">
       <a href="#/zone/${zone.id}">${esc(zone.name)}</a>
       ${status}
     </div>
-    <div class="temp">${zone.current_temp == null ? `<small>No reading</small>` : fmtTemp(zone.current_temp)}</div>
+    <div class="row">${modePill(zone, info.hasSensor)}${zone.heater && zone.heater != "unknown" ? `<span class="pill">${HEATERS[zone.heater]}</span>` : ""}</div>
+    <div class="temp">${zone.current_temp == null ? `<small>${info.hasSensor ? "No reading" : "No sensor"}</small>` : fmtTemp(zone.current_temp)}</div>
     ${target}
-    ${plan ? `<span class="muted small">${esc(plan)}</span>` : ""}
+    <div class="zone-facts small">
+      <span>${esc(when)}</span>
+      ${plan ? `<span class="muted">${esc(plan)}</span>` : ""}
+      ${rooms}
+    </div>
     <div class="row">
       <label class="switch"><input type="checkbox" data-enable="${zone.id}" ${zone.is_enabled ? "checked" : ""}> Heating on</label>
       <span class="grow"></span>
@@ -363,6 +395,31 @@ function zoneCard(zone) {
       }
     </div>
   </article>`;
+}
+
+// Whether the boiler is running: it fires whenever any zone (hot water
+// included) calls for heat
+function boilerCard(zones, controller) {
+  const seen = controller?.last_seen_at ? Date.parse(controller.last_seen_at) : 0;
+  if (!seen || Date.now() - seen > 5 * 60000) {
+    return `<section class="card boiler"><div class="row"><span class="boiler-icon">${flame}</span>
+      <div><strong>Boiler: not known</strong><div class="small muted">The controller hasn't reported for a while.</div></div></div></section>`;
+  }
+  const calling = zones.filter((z) => z.is_on);
+  const next = zones
+    .filter((z) => !z.is_on && z.is_enabled && z.eco_enabled && z.plan?.next_start && z.plan.next_start * 1000 > Date.now())
+    .sort((a, b) => a.plan.next_start - b.plan.next_start)[0];
+  const detail = calling.length
+    ? `Heating ${calling.map((z) => esc(z.name)).join(", ")}`
+    : next ? `Next on: ${esc(next.name)} about ${unixTime(next.plan.next_start)}` : "No zone needs heat right now";
+  const updated = zones.map((z) => z.state_updated_at).filter(Boolean).sort().pop();
+  return `<section class="card boiler ${calling.length ? "on" : ""}" aria-live="polite">
+    <div class="row">
+      <span class="boiler-icon">${flame}</span>
+      <div class="grow"><strong>Boiler ${calling.length ? "on" : "off"}</strong><div class="small muted">${detail}</div></div>
+      ${updated ? `<span class="small muted">Updated ${fmtAgo(updated)}</span>` : ""}
+    </div>
+  </section>`;
 }
 
 const HEATERS = { radiators: "Radiators", underfloor: "Underfloor heating", unknown: "Not sure" };
@@ -487,7 +544,7 @@ function adviceBanner(n) {
 async function zonesPage() {
   setNav("zones");
   const yearAgo = new Date(Date.now() - 400 * 86400000).toISOString().slice(0, 10);
-  const [{ data: zones, error }, controller, { data: notes }, { data: daily }, { data: sensors }, money] = await Promise.all([
+  const [{ data: zones, error }, controller, { data: notes }, { data: daily }, { data: sensors }, money, { data: rooms }, { data: slots }] = await Promise.all([
     supabase.from("zones").select("*").eq("home_id", home.id).order("local_id"),
     loadController(),
     supabase.from("notifications").select("*").eq("home_id", home.id).is("dismissed_at", null)
@@ -495,6 +552,8 @@ async function zonesPage() {
     supabase.from("zone_daily").select("zone_local_id, day, boiler_minutes, eco_minutes, hdd").eq("home_id", home.id).gte("day", yearAgo).limit(5000),
     supabase.from("sensors").select("zone_id").eq("home_id", home.id),
     loadBudget(),
+    supabase.from("rooms").select("name, zone_id").eq("home_id", home.id).order("name"),
+    supabase.from("schedule_slots").select("zone_id, day, on_time, off_time").eq("home_id", home.id).order("on_time"),
   ]);
   if (error) return render(message("error", fail(error)));
   showOfflineBanner(controller);
@@ -518,9 +577,14 @@ async function zonesPage() {
     </div>
     <div id="feel-panel"></div>
     <h1>Zones</h1>
+    ${boilerCard(zones, controller)}
     ${heaterQuestion(zones, zoneIdsWithSensors)}
     ${budgetCard(money.budget, money.plan, true)}
-    <div class="zones">${zones.map(zoneCard).join("")}</div>
+    <div class="zones">${zones.map((z) => zoneCard(z, {
+      hasSensor: zoneIdsWithSensors.has(z.id),
+      rooms: (rooms || []).filter((r) => r.zone_id == z.id).map((r) => r.name),
+      slots: (slots || []).filter((s) => s.zone_id == z.id),
+    })).join("")}</div>
     ${energyCard(energySummary(daily || [], sensorZones))}`);
 
   bindHeaterSelects(zonesPage);
@@ -684,7 +748,7 @@ function hoursText(h) {
   return (half == 1 ? "an hour" : half + " hours");
 }
 
-// Intelligent mode: when the zone is warm, from the rooms on the Your home page
+// Intelligent mode: when the zone is warm, from the rooms on the Rooms page
 function warmSection(zone, scheduleSlots) {
   const p = zone.plan || {};
   const slots = p.slots || [];
@@ -693,9 +757,9 @@ function warmSection(zone, scheduleSlots) {
   const options = [];
   for (let t = 16; t <= 23; t += 0.5) options.push(t);
   const source = {
-    rooms: "From when you use its rooms. Change them on the <a href=\"#/home\">Your home</a> page.",
-    minimum: `Its rooms are rarely used, so it's kept at its minimum (${fmtTemp(zone.min_temp)}). Add times on the <a href="#/home">Your home</a> page for when you'll use them.`,
-    schedule: "No room times yet, so it follows its old schedule. Tell us when its rooms are used on the <a href=\"#/home\">Your home</a> page.",
+    rooms: "From when you use its rooms. Change them on the <a href=\"#/rooms\">Rooms</a> page.",
+    minimum: `Its rooms are rarely used, so it's kept at its minimum (${fmtTemp(zone.min_temp)}). Add times on the <a href="#/rooms">Rooms</a> page for when you'll use them.`,
+    schedule: "No room times yet, so it follows its old schedule. Tell us when its rooms are used on the <a href=\"#/rooms\">Rooms</a> page.",
   }[p.source] || "Waiting for the controller.";
   const next = planLine(zone);
   return `<section class="card">
@@ -1491,7 +1555,7 @@ async function budgetPage() {
             `<option value="${t}" ${Number(z.min_temp) == t ? "selected" : ""}>${t == 5 ? "Frost only" : t + " °C"}</option>`).join("")}</select></div>`).join("")}
         <div class="out"></div>
         <button class="primary" type="submit">Save</button>
-        <p class="small muted">Tell us <a href="#/home">which rooms you use and when</a> and the plan can cool the right places.</p>
+        <p class="small muted">Tell us <a href="#/rooms">which rooms you use and when</a> and the plan can cool the right places.</p>
       </form>
     </section>
     <section class="card">
@@ -1803,7 +1867,7 @@ function drawMonths(periods, onPick) {
 }
 
 // ---------------------------------------------------------------------------
-// Your home: rooms and when they're used
+// Rooms: which rooms are in each zone and when they're used
 
 // Common times for the manual room form
 const WEEK = [1, 2, 3, 4, 5];
@@ -1826,68 +1890,159 @@ function describePeriods(periods) {
   }).join("; ");
 }
 
-async function homePage() {
-  setNav("budget");
-  clearInterval(refreshTimer);
-  const [{ data: rooms }, { data: zones }] = await Promise.all([
-    supabase.from("rooms").select("*").eq("home_id", home.id).order("name"),
-    supabase.from("zones").select("id, local_id, name").eq("home_id", home.id).order("local_id"),
-  ]);
-  const zoneName = Object.fromEntries(zones.map((z) => [z.id, z.name]));
-  const usageLabel = { often: "Used often", sometimes: "Used sometimes", rarely: "Rarely used" };
+const USAGE_LABEL = { often: "Used often", sometimes: "Used sometimes", rarely: "Rarely used" };
+const DAY_CHOICES = [["0,1,2,3,4,5,6", "Every day"], ["1,2,3,4,5", "Weekdays"], ["0,6", "Weekends"],
+  ...[1, 2, 3, 4, 5, 6, 0].map((d) => [String(d), DAYS[d]])];
 
-  render(`<p class="small"><a href="#/budget">← Budget</a></p>
-    <h1>Your home</h1>
+// What a room's times mean for the heating, in words
+function roomTimesText(room) {
+  if (room.periods?.length) return describePeriods(room.periods);
+  return room.usage == "rarely" ? "No set times: kept at the zone's minimum" : "No set times: follows the zone's schedule";
+}
+
+// The times editor for one room: rows of days, from and to
+function periodRows(periods) {
+  return periods.map((p, i) => {
+    const key = [...p.days].sort().join(",");
+    const known = DAY_CHOICES.some(([v]) => v == key);
+    const options = (known ? DAY_CHOICES : [[key, describePeriods([{ days: p.days, from: "", to: "" }]).trim()], ...DAY_CHOICES])
+      .map(([v, label]) => `<option value="${v}" ${v == key ? "selected" : ""}>${esc(label)}</option>`).join("");
+    return `<div class="row period" data-i="${i}">
+      <select class="grow" data-f="days" aria-label="Days">${options}</select>
+      <input type="time" data-f="from" value="${p.from}" aria-label="From" required style="max-width:120px">
+      <span>to</span>
+      <input type="time" data-f="to" value="${p.to}" aria-label="To" required style="max-width:120px">
+      <button type="button" class="link danger" data-remove-period="${i}" aria-label="Remove these times">Remove</button>
+    </div>`;
+  }).join("");
+}
+
+function roomForm(room, zones) {
+  return `<form class="room-form" data-room-form="${room.id || "new"}">
+    <div class="row">
+      <label class="grow">Room<input name="name" value="${esc(room.name || "")}" maxlength="40" required></label>
+      <label class="grow">Zone<select name="zone">${zones.map((z) => `<option value="${z.id}" ${z.id == room.zone_id ? "selected" : ""}>${esc(z.name)}</option>`).join("")}</select></label>
+      <label class="grow">How often<select name="usage">${Object.entries(USAGE_LABEL)
+        .map(([v, label]) => `<option value="${v}" ${v == room.usage ? "selected" : ""}>${label}</option>`).join("")}</select></label>
+    </div>
+    <label>When it's used</label>
+    <div class="periods">${periodRows(room.periods || [])}</div>
+    <p class="small muted no-times" ${room.periods?.length ? "hidden" : ""}>No set times. Used often or sometimes: warm during the zone's schedule. Rarely used: kept at the zone's minimum.</p>
+    <div class="row"><button type="button" class="link" data-add-period>Add times</button></div>
+    <label class="switch" style="margin-top:12px"><input type="checkbox" name="trv" ${room.has_trv === false ? "" : "checked"}> Has a radiator valve (TRV)</label>
+    <div class="out"></div>
+    <div class="row" style="margin-top:12px"><button class="primary" type="submit">Save</button><button type="button" data-cancel>Cancel</button></div>
+  </form>`;
+}
+
+function readPeriods(form) {
+  return [...form.querySelectorAll(".period")].map((row) => ({
+    days: row.querySelector("[data-f=days]").value.split(",").map(Number),
+    from: row.querySelector("[data-f=from]").value,
+    to: row.querySelector("[data-f=to]").value,
+  }));
+}
+
+function bindRoomForm(form, room, onDone) {
+  const periodsBox = form.querySelector(".periods");
+  const redraw = (periods) => {
+    periodsBox.innerHTML = periodRows(periods);
+    form.querySelector(".no-times").hidden = periods.length > 0;
+    periodsBox.querySelectorAll("[data-remove-period]").forEach((b) => {
+      b.onclick = () => {
+        const periods = readPeriods(form);
+        periods.splice(Number(b.dataset.removePeriod), 1);
+        redraw(periods);
+      };
+    });
+  };
+  redraw(room.periods || []);
+  form.querySelector("[data-add-period]").onclick = () => redraw([...readPeriods(form), { days: ALL, from: "07:00", to: "22:00" }]);
+  form.querySelector("[data-cancel]").onclick = onDone;
+  form.onsubmit = (e) => {
+    e.preventDefault();
+    submitting(form, async () => {
+      const periods = readPeriods(form);
+      if (periods.some((p) => p.to <= p.from)) throw new Error("Each time must end after it starts.");
+      const fields = {
+        name: form.querySelector("[name=name]").value.trim(),
+        zone_id: form.zone.value,
+        usage: form.usage.value,
+        has_trv: form.trv.checked,
+        periods,
+      };
+      const { error } = room.id
+        ? await supabase.from("rooms").update(fields).eq("id", room.id)
+        : await supabase.from("rooms").insert({ home_id: home.id, ...fields });
+      if (error) throw error;
+      onDone();
+    });
+  };
+}
+
+// Rooms: which rooms are in each zone and when they're used. With
+// intelligent heating, these times decide when each zone is warm.
+async function roomsPage() {
+  setNav("rooms");
+  clearInterval(refreshTimer);
+  const [{ data: rooms }, { data: zones }, { data: sensors }] = await Promise.all([
+    supabase.from("rooms").select("*").eq("home_id", home.id).order("name"),
+    supabase.from("zones").select("id, local_id, name, eco_enabled, plan, min_temp").eq("home_id", home.id).order("local_id"),
+    supabase.from("sensors").select("zone_id").eq("home_id", home.id),
+  ]);
+  const withSensor = new Set(sensors.map((s) => s.zone_id));
+  const shown = zones.filter((z) => withSensor.has(z.id) || rooms.some((r) => r.zone_id == z.id));
+
+  render(`<h1>Rooms</h1>
+    <p class="muted">With intelligent heating on, each zone is warm when its rooms are used. Set the times here and the controller works out when to start the boiler.</p>
+    ${shown.map((z) => {
+      const own = rooms.filter((r) => r.zone_id == z.id);
+      const intelligent = z.eco_enabled && withSensor.has(z.id);
+      const warm = intelligent && z.plan?.slots?.length
+        ? `<p class="small" style="margin-bottom:0">Warm:</p><ul class="small" style="margin-top:4px">${describeWarm(z.plan.slots)}</ul>`
+        : intelligent ? `<p class="small muted">Working out the warm times…</p>`
+        : `<p class="small muted">Intelligent heating is off for this zone, so it follows its schedule. <a href="#/zone/${z.id}">Switch it on</a> to heat by these room times.</p>`;
+      return `<section class="card">
+        <div class="zone-head"><h3>${esc(z.name)}</h3>${modePill(z, withSensor.has(z.id))}</div>
+        ${warm}
+        ${own.length ? `<ul class="rooms">${own.map((r) => `<li data-room-item="${r.id}">
+            <div class="row"><strong class="grow">${esc(r.name)}</strong>
+              <button class="link" data-edit-room="${r.id}">Edit</button>
+              <button class="link danger" data-remove-room="${r.id}">Remove</button></div>
+            <div class="small">${USAGE_LABEL[r.usage]} · ${esc(roomTimesText(r))}${r.has_trv ? "" : " · no radiator valve"}</div>
+          </li>`).join("")}</ul>`
+          : `<p class="muted small">No rooms yet.</p>`}
+        <button class="link" data-add-room="${z.id}">Add a room</button>
+      </section>`;
+    }).join("")}
     <section class="card">
-      <h3>Tell us about your rooms</h3>
-      <p class="small muted">Which rooms are on each floor, and when you use them, so the budget plan cools the right places. The assistant asks a few questions and then suggests a list for you to check.</p>
+      <h3>Describe your home instead</h3>
+      <p class="small muted">Tell the assistant about your rooms and when you use them; it suggests a list for you to check.</p>
       ${chatBox("home-chat", "e.g. Upstairs is two bedrooms and a study…")}
       <div id="proposal"></div>
-    </section>
-    <section class="card">
-      <h3>Rooms</h3>
-      ${rooms.length ? `<table><thead><tr><th>Room</th><th class="hide-small">Zone</th><th>Use</th><th class="hide-small">Valve</th><th></th></tr></thead><tbody>
-        ${rooms.map((r) => `<tr><td>${esc(r.name)}</td><td class="hide-small">${esc(zoneName[r.zone_id] || "–")}</td>
-          <td>${usageLabel[r.usage]}<div class="small muted">${esc(describePeriods(r.periods))}</div></td>
-          <td class="hide-small">${r.has_trv ? "Yes" : "No"}</td>
-          <td><button class="link danger" data-room="${r.id}">Remove</button></td></tr>`).join("")}</tbody></table>`
-        : `<p class="muted">No rooms yet.</p>`}
-      <form id="add-room" class="row" style="margin-top:12px">
-        <input class="grow" name="name" placeholder="Room name" maxlength="40" required aria-label="Room name">
-        <select class="grow" name="zone" aria-label="Zone">${zones.map((z) => `<option value="${z.id}">${esc(z.name)}</option>`).join("")}</select>
-        <select class="grow" name="usage" aria-label="How often it's used">
-          <option value="often">Used often</option><option value="sometimes">Used sometimes</option><option value="rarely">Rarely used</option></select>
-        <select class="grow" name="when" aria-label="When it's used">${Object.keys(USE_TIMES).map((k) => `<option value="${k}">${esc(k)}</option>`).join("")}</select>
-        <label class="switch"><input type="checkbox" name="trv" checked> Radiator valve</label>
-        <button type="submit">Add room</button>
-        <div class="out" style="width:100%"></div>
-      </form>
     </section>`);
 
   bindChat("home-chat", "home", (proposal) => showProposal(proposal, zones));
 
-  const add = document.getElementById("add-room");
-  add.onsubmit = (e) => {
-    e.preventDefault();
-    submitting(add, async () => {
-      const { error } = await supabase.from("rooms").insert({
-        home_id: home.id,
-        zone_id: add.zone.value,
-        name: add.querySelector("[name=name]").value.trim(),
-        usage: add.usage.value,
-        has_trv: add.trv.checked,
-        periods: USE_TIMES[add.when.value],
-      });
-      if (error) throw error;
-      homePage();
-    });
+  const openForm = (anchor, room) => {
+    app.querySelectorAll(".room-form").forEach((f) => f.remove());
+    anchor.insertAdjacentHTML("afterend", roomForm(room, shown)); // zones with a sensor (not hot water)
+    const form = anchor.nextElementSibling;
+    bindRoomForm(form, room, roomsPage);
+    form.querySelector("[name=name]").focus();
   };
-  app.querySelectorAll("[data-room]").forEach((b) => {
+  app.querySelectorAll("[data-edit-room]").forEach((b) => {
+    b.onclick = () => openForm(b.closest("li"), rooms.find((r) => r.id == b.dataset.editRoom));
+  });
+  app.querySelectorAll("[data-add-room]").forEach((b) => {
+    b.onclick = () => openForm(b, { zone_id: b.dataset.addRoom, usage: "often", has_trv: true, periods: [{ days: ALL, from: "07:00", to: "22:00" }] });
+  });
+  app.querySelectorAll("[data-remove-room]").forEach((b) => {
     b.onclick = async () => {
       if (!confirm("Remove this room?")) return;
-      const { error } = await supabase.from("rooms").delete().eq("id", b.dataset.room);
+      const { error } = await supabase.from("rooms").delete().eq("id", b.dataset.removeRoom);
       if (error) return alert(fail(error));
-      homePage();
+      roomsPage();
     };
   });
 }
@@ -1919,7 +2074,7 @@ function showProposal(proposal, zones) {
         periods: r.periods,
       })));
       if (error) throw error;
-      homePage();
+      roomsPage();
     });
   };
 }
@@ -1951,7 +2106,7 @@ async function route_() {
     if (hash == "#/sensors") return await sensorsPage();
     if (hash == "#/budget") return await budgetPage();
     if (hash == "#/costs") return await costsPage();
-    if (hash == "#/home") return await homePage();
+    if (hash == "#/rooms" || hash == "#/home") return await roomsPage();
     if (hash == "#/settings") return await settingsPage();
     return await zonesPage();
   } catch (error) {
