@@ -9,7 +9,8 @@
 //   #/settings         home, controller and account
 
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm";
-import { config } from "./config.js?v=2026101913";
+import { config } from "./config.js?v=2026101914";
+import { priceCurrent, priceTypicalMonth, currentSettings } from "./forecast.js?v=2026101914";
 
 const app = document.getElementById("app");
 const topbar = document.getElementById("topbar");
@@ -1423,6 +1424,7 @@ function budgetCard(budget, plan, compact) {
     <p><strong>${pounds(spent)}</strong> spent of <strong>${pounds(budget.monthly_pence)}</strong>${forecast != null ? `, heading for about <strong>${pounds(forecast)}</strong>` : ""}.
       ${plan?.estimated ? `<span class="small muted">Partly estimated from boiler time.</span>` : ""}</p>
     ${message(status.kind, status.text)}
+    ${!compact && forecast != null ? `<button id="try-changes" type="button">Try your own changes</button>` : ""}
   </section>`;
 }
 
@@ -1483,15 +1485,246 @@ function bindChat(id, mode, onProposal) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// What if: try other temperatures and times and see the month's cost, priced
+// in the browser from the kit the controller uploads each hour (forecast.js)
+
+const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+const WEEKEND = [0, 6];
+
+// A zone's slots as the editor shows them: one temperature, and the times
+// for weekdays and for weekends (Monday's and Saturday's)
+function editableZone(z) {
+  const temps = z.slots.map((s) => s.temp);
+  const times = (day) => z.slots.filter((s) => s.day == day).sort((a, b) => a.from.localeCompare(b.from))
+    .map((s) => [s.from, s.to == "24:00" ? "23:59" : s.to]);
+  const weekday = times(1);
+  const weekend = times(6);
+  const same = (day, list) => JSON.stringify(times(day)) == JSON.stringify(list);
+  const simple = WEEK.every((d) => same(d, weekday)) && WEEKEND.every((d) => same(d, weekend)) && new Set(temps).size <= 1;
+  return { enabled: z.enabled, temp: temps.length ? Math.max(...temps) : 20, weekday, weekend, simple, changed: false };
+}
+
+function slotsFrom(e, z) {
+  const temp = z.has_sensors ? e.temp : z.slots[0]?.temp ?? 20;
+  const out = [];
+  WEEK.forEach((day) => e.weekday.forEach(([from, to]) => out.push({ day, from, to, temp })));
+  WEEKEND.forEach((day) => e.weekend.forEach(([from, to]) => out.push({ day, from, to, temp })));
+  return out.filter((s) => s.to > s.from);
+}
+
+function whatIfTimes(zoneId, group, list) {
+  return `<div class="whatif-times"><span class="small muted">${group == "weekday" ? "Weekdays" : "Weekends"}</span>
+    ${list.map(([from, to], i) => `<span class="whatif-period">
+      <input type="time" value="${from}" data-wz="${zoneId}" data-group="${group}" data-i="${i}" data-end="0" aria-label="${group} period ${i + 1} from">
+      –<input type="time" value="${to}" data-wz="${zoneId}" data-group="${group}" data-i="${i}" data-end="1" aria-label="${group} period ${i + 1} to">
+      <button type="button" class="link danger" data-wremove="${zoneId}" data-group="${group}" data-i="${i}" aria-label="Remove">×</button></span>`).join("")}
+    <button type="button" class="link" data-wadd="${zoneId}" data-group="${group}">${list.length ? "+ add" : "Add times"}</button>
+  </div>`;
+}
+
+function whatIfZone(z, e) {
+  const temps = [];
+  for (let t = 10; t <= 24; t += 0.5) temps.push(t);
+  return `<div class="whatif-zone ${e.enabled ? "" : "off"}" data-zone-box="${z.local_id}">
+    <div class="row">
+      <label class="switch grow"><input type="checkbox" data-won="${z.local_id}" ${e.enabled ? "checked" : ""}> <strong>${esc(z.name)}</strong></label>
+      ${z.has_sensors ? `<select data-wtemp="${z.local_id}" aria-label="${esc(z.name)} temperature" style="max-width:110px">${temps
+        .map((t) => `<option value="${t}" ${t == e.temp ? "selected" : ""}>${t.toFixed(1)} °C</option>`).join("")}</select>` : `<span class="small muted">Hot water</span>`}
+      <span class="small whatif-cost" data-wcost="${z.local_id}"></span>
+    </div>
+    ${e.enabled ? `${whatIfTimes(z.local_id, "weekday", e.weekday)}${whatIfTimes(z.local_id, "weekend", e.weekend)}
+      ${e.simple || e.changed ? "" : `<p class="small muted">Its times differ from day to day; changing them here sets weekdays and weekends.</p>`}` : ""}
+  </div>`;
+}
+
+function whatIfMonths(kit) {
+  const start = new Date(kit.period.start + "T00:00:00");
+  const end = new Date(new Date(kit.period.end + "T00:00:00") - 86400000);
+  const fmt = (d) => d.toLocaleDateString([], { day: "numeric", month: "short" });
+  const now = new Date();
+  const options = [`<option value="current">This billing month (${fmt(start)} – ${fmt(end)})</option>`];
+  for (let i = 0; i < 12; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth() + i, 1);
+    options.push(`<option value="${d.getFullYear()}-${d.getMonth()}">A typical ${MONTHS[d.getMonth()]}</option>`);
+  }
+  return options.join("");
+}
+
+async function whatIfCard(box, kit, budget, zones, rooms) {
+  if (!kit) {
+    box.innerHTML = `<h3>What if…</h3><p class="muted small">This appears once your controller has sent its first forecast, within the hour.</p>`;
+    return;
+  }
+  const kz = kit.zones.filter((z) => z.slots.length || z.enabled);
+  const base = currentSettings(kit);
+  const edits = Object.fromEntries(kz.map((z) => [z.local_id, editableZone(z)]));
+  let month = "current";
+
+  const settings = () => {
+    const out = currentSettings(kit);
+    kz.forEach((z) => {
+      const e = edits[z.local_id];
+      out[z.local_id] = { enabled: e.enabled, slots: e.changed ? slotsFrom(e, z) : z.slots };
+    });
+    return out;
+  };
+  const price = (s) => {
+    if (month == "current") return priceCurrent(kit, s);
+    const [y, m] = month.split("-").map(Number);
+    return priceTypicalMonth(kit, s, m, y);
+  };
+
+  // the dashboard and the controller should agree on today's settings
+  const check = priceCurrent(kit, base);
+  if (Math.abs(check.total_pence - kit.expected_pence) > Math.max(5, kit.expected_pence * 0.01)) {
+    console.warn("What-if pricing differs from the controller's:", check.total_pence, kit.expected_pence);
+  }
+
+  box.innerHTML = `<h3>What if…</h3>
+    <p class="small muted">Try other temperatures and warm times and see what the month would cost. It prices your settings as you set them, before the budget plan's automatic cuts.</p>
+    <label for="whatif-month">Month</label>
+    <select id="whatif-month" style="max-width:340px">${whatIfMonths(kit)}</select>
+    <div id="whatif-result" class="whatif-result" aria-live="polite"></div>
+    <div id="whatif-zones"></div>
+    <div class="out"></div>
+    <div class="row" style="margin-top:12px">
+      <button class="primary" id="whatif-apply" disabled>Use these settings</button>
+      <button id="whatif-reset" disabled>Reset</button>
+    </div>
+    <p class="small muted">Weather forecast for the next 16 days, then typical weather for your home. Figures from ${fmtAgo(kit.made_at)}.</p>`;
+
+  const zonesBox = box.querySelector("#whatif-zones");
+  const result = box.querySelector("#whatif-result");
+
+  const update = () => {
+    const now = price(settings());
+    const before = price(base);
+    const budgetPence = budget?.monthly_pence || null;
+    const diff = now.total_pence - before.total_pence;
+    const over = budgetPence ? now.total_pence - budgetPence : null;
+    const pct = (v) => Math.min(100, Math.round((v / Math.max(budgetPence || 1, now.total_pence, 1)) * 100));
+    result.innerHTML = `<div class="row"><span class="whatif-total">${pounds(now.total_pence)}</span>
+        <span class="small muted grow">${month == "current" ? `for this billing month: ${pounds(now.spent_pence)} spent so far, ${pounds(now.total_pence - now.spent_pence)} to come` : `for a typical ${MONTHS[Number(month.split("-")[1])]} (${now.days} days)`}</span></div>
+      ${budgetPence ? `<div class="bar" role="img" aria-label="${pounds(now.total_pence)} against a budget of ${pounds(budgetPence)}">
+        <span class="spent" style="width:${pct(Math.min(now.total_pence, budgetPence))}%"></span></div>
+        ${message(over > 0 ? "error" : "success", over > 0 ? `${pounds(over)} over your ${pounds(budgetPence)} budget` : `${pounds(-over)} under your ${pounds(budgetPence)} budget`)}` : ""}
+      ${Math.abs(diff) >= 1 ? `<p class="small"><strong>${diff > 0 ? "+" : "−"}${pounds(Math.abs(diff))}</strong> compared with your current settings.</p>` : ""}
+      <p class="small muted">Standing charge ${pounds(now.standing_pence)}${now.other_pence >= 1 ? `, other gas ${pounds(now.other_pence)}` : ""}.</p>`;
+    kz.forEach((z) => {
+      const cell = box.querySelector(`[data-wcost="${z.local_id}"]`);
+      if (!cell) return;
+      const a = now.zones[z.local_id] || 0;
+      const b = before.zones[z.local_id] || 0;
+      cell.innerHTML = `${pounds(a)}${Math.abs(a - b) >= 1 ? ` <span class="${a > b ? "worse" : "better"}">(${a > b ? "+" : "−"}${pounds(Math.abs(a - b))})</span>` : ""}`;
+    });
+    const dirty = kz.some((z) => edits[z.local_id].changed || edits[z.local_id].enabled != z.enabled);
+    box.querySelector("#whatif-apply").disabled = !dirty;
+    box.querySelector("#whatif-reset").disabled = !dirty;
+  };
+
+  const draw = () => {
+    zonesBox.innerHTML = kz.map((z) => whatIfZone(z, edits[z.local_id])).join("");
+    const touched = (id) => (edits[id].changed = true);
+    zonesBox.querySelectorAll("[data-won]").forEach((c) => (c.onchange = () => { edits[c.dataset.won].enabled = c.checked; draw(); }));
+    zonesBox.querySelectorAll("[data-wtemp]").forEach((sel) => (sel.onchange = () => {
+      edits[sel.dataset.wtemp].temp = Number(sel.value);
+      touched(sel.dataset.wtemp);
+      update();
+    }));
+    zonesBox.querySelectorAll("[data-wz]").forEach((input) => (input.onchange = () => {
+      const e = edits[input.dataset.wz];
+      if (!input.value) return;
+      e[input.dataset.group][Number(input.dataset.i)][Number(input.dataset.end)] = input.value;
+      touched(input.dataset.wz);
+      update();
+    }));
+    zonesBox.querySelectorAll("[data-wremove]").forEach((b) => (b.onclick = () => {
+      edits[b.dataset.wremove][b.dataset.group].splice(Number(b.dataset.i), 1);
+      touched(b.dataset.wremove);
+      draw();
+    }));
+    zonesBox.querySelectorAll("[data-wadd]").forEach((b) => (b.onclick = () => {
+      const list = edits[b.dataset.wadd][b.dataset.group];
+      list.push(list.length ? [list[list.length - 1][1] < "21:00" ? "21:00" : "18:00", "22:00"] : ["07:00", "09:00"]);
+      touched(b.dataset.wadd);
+      draw();
+    }));
+    update();
+  };
+
+  box.querySelector("#whatif-month").onchange = (e) => { month = e.target.value; update(); };
+  box.querySelector("#whatif-reset").onclick = () => {
+    kz.forEach((z) => (edits[z.local_id] = editableZone(z)));
+    draw();
+  };
+  box.querySelector("#whatif-apply").onclick = async (e) => {
+    const out = box.querySelector(".out");
+    const byLocal = Object.fromEntries(zones.map((z) => [z.local_id, z]));
+    const changes = kz.filter((z) => edits[z.local_id].changed || edits[z.local_id].enabled != z.enabled);
+    // intelligent zones take their times from their rooms: say which rooms change
+    const roomNote = changes.filter((z) => z.intelligent && edits[z.local_id].changed && edits[z.local_id].enabled).map((z) => {
+      const own = rooms.filter((r) => r.zone_id == byLocal[z.local_id]?.id);
+      return own.length ? `${z.name}: sets the times of ${own.map((r) => r.name).join(", ")}` : "";
+    }).filter(Boolean);
+    if (!confirm(`Use these settings for ${changes.map((z) => z.name).join(", ")}?${roomNote.length ? "\n\n" + roomNote.join("\n") : ""}`)) return;
+    e.target.disabled = true;
+    try {
+      for (const z of changes) {
+        const ed = edits[z.local_id];
+        const zone = byLocal[z.local_id];
+        if (!zone) continue;
+        if (ed.enabled != z.enabled) {
+          const { error } = await supabase.from("zones").update({ is_enabled: ed.enabled }).eq("id", zone.id);
+          if (error) throw error;
+        }
+        if (!ed.changed || !ed.enabled) continue;
+        const own = rooms.filter((r) => r.zone_id == zone.id);
+        if (z.intelligent && own.length) {
+          // the temperature is the zone's comfort temperature; the times go to its rooms
+          const { error } = await supabase.from("zones").update({ comfort_temp: ed.temp }).eq("id", zone.id);
+          if (error) throw error;
+          const periods = [
+            ...ed.weekday.filter(([a, b]) => b > a).map(([from, to]) => ({ days: WEEK, from, to })),
+            ...ed.weekend.filter(([a, b]) => b > a).map(([from, to]) => ({ days: WEEKEND, from, to })),
+          ];
+          for (const r of own) {
+            const { error: roomError } = await supabase.from("rooms").update({ periods }).eq("id", r.id);
+            if (roomError) throw roomError;
+          }
+        } else {
+          if (z.intelligent) {
+            const { error } = await supabase.from("zones").update({ comfort_temp: ed.temp }).eq("id", zone.id);
+            if (error) throw error;
+          }
+          const { error } = await supabase.rpc("set_zone_schedule", {
+            p_zone: zone.id,
+            p_slots: slotsFrom(ed, z).map((s) => ({ day: s.day, on_time: s.from, off_time: s.to, temp: s.temp })),
+          });
+          if (error) throw error;
+        }
+      }
+      out.innerHTML = message("success", "Saved. The controller picks them up within a minute, and the budget plan and this forecast update within the hour.");
+    } catch (error) {
+      out.innerHTML = message("error", fail(error));
+      e.target.disabled = false;
+    }
+  };
+
+  draw();
+}
+
 async function budgetPage() {
   setNav("budget");
   clearInterval(refreshTimer);
-  const [{ budget, plan }, { data: zones }, { data: status }, controller, { data: acc }] = await Promise.all([
+  const [{ budget, plan }, { data: zones }, { data: status }, controller, { data: acc }, { data: whatIf }, { data: rooms }] = await Promise.all([
     loadBudget(),
     supabase.from("zones").select("id, local_id, name, min_temp, budget_offset").eq("home_id", home.id).order("local_id"),
     supabase.from("energy_status").select("*").eq("home_id", home.id).maybeSingle(),
     loadController(),
     supabase.from("model_accuracy").select("summary").eq("home_id", home.id).maybeSingle(),
+    supabase.from("what_if").select("kit").eq("home_id", home.id).maybeSingle(),
+    supabase.from("rooms").select("id, name, zone_id").eq("home_id", home.id).order("name"),
   ]);
   showOfflineBanner(controller);
   const periodStart = plan?.period_start;
@@ -1531,6 +1764,7 @@ async function budgetPage() {
           <button class="primary" data-apply="${esc(s.key)}">Apply</button><button data-decline="${esc(s.key)}">Not now</button></div>`).join("")}` : ""}
       ${plan.trv_advice.length ? `<p class="small muted">Radiator valves:</p><ul>${plan.trv_advice.map((t) => `<li>${esc(t.text)}</li>`).join("")}</ul>` : ""}
     </section>` : ""}
+    <section class="card" id="what-if"></section>
     ${daily.length ? `<section class="card"><h3>Daily cost this month</h3>
       <div class="chart-wrap short"><canvas id="costs" role="img" aria-label="Gas cost each day this billing month"></canvas></div>
       <p class="small muted">Striped bars are estimated from boiler time; solid bars are from your meter.</p></section>` : ""}
@@ -1577,6 +1811,8 @@ async function budgetPage() {
 
   if (daily.length) drawCosts(daily);
   bindChat("ask", "ask");
+  whatIfCard(document.getElementById("what-if"), whatIf?.kit || null, budget, zones, rooms || []);
+  document.getElementById("try-changes")?.addEventListener("click", () => document.getElementById("what-if").scrollIntoView({ behavior: "smooth" }));
 
   document.getElementById("explain")?.addEventListener("click", async (e) => {
     const out = document.getElementById("explanation");

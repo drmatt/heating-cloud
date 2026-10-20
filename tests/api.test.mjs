@@ -185,6 +185,18 @@ ok(lz.heater == "underfloor" && Number(lz.comfort_temp) == 20.5, "controller get
 r = await call("GET", "/rest/v1/zones?local_id=eq.1&select=plan", undefined, alice);
 ok(r.body[0].plan?.source == "rooms" && r.body[0].plan.slots.length == 1, "alice sees the controller's plan");
 
+// what-if kit: written by the controller, read by members only
+r = await call("POST", "/rest/v1/what_if?on_conflict=home_id", { home_id: home, kit: { version: 1, made_at: "x" } }, ctok, "resolution=merge-duplicates,return=minimal");
+ok(r.status < 300, "controller uploads its what-if kit");
+r = await call("POST", "/rest/v1/what_if?on_conflict=home_id", { home_id: home, kit: { version: 1, made_at: "y" } }, ctok, "resolution=merge-duplicates,return=minimal");
+ok(r.status < 300, "and replaces it");
+r = await call("GET", "/rest/v1/what_if?select=kit", undefined, alice);
+ok(r.body.length == 1 && r.body[0].kit.made_at == "y", "alice reads the latest kit");
+r = await call("GET", "/rest/v1/what_if?select=kit", undefined, bob);
+ok(r.body.length == 0, "bob can't read alice's kit");
+r = await call("PATCH", "/rest/v1/what_if?home_id=eq." + home, { kit: {} }, alice);
+ok(r.status >= 400 || (await call("GET", "/rest/v1/what_if?select=kit", undefined, alice)).body[0].kit.made_at == "y", "alice can't change the kit");
+
 r = await call("POST", "/rest/v1/energy_daily?on_conflict=home_id,day", [{ home_id: home, day: "2026-10-16", kwh: 40.5, cost_pence: 347, metered: true }], ctok, "resolution=merge-duplicates,return=minimal");
 ok(r.status == 201, "controller uploads daily energy");
 r = await call("POST", "/rest/v1/energy_daily", [{ home_id: home, day: "2026-10-17", kwh: 1, cost_pence: 1, metered: true }], alice);
