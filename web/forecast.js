@@ -22,6 +22,8 @@ const MAX_LIFT = 30; // learning/model.js solAir
 // learning/dynamics.js
 const SIM_STEP = 5 * 60;
 const HOUR = 3600;
+const DAY_FROM = 7; // free heat: Gday from 07:00 to 23:00, Gnight otherwise
+const DAY_TO = 23;
 
 // control/eco.js
 const FROST_TEMP = 5;
@@ -49,6 +51,12 @@ function chargeStep(x, on, hours, d) {
   return x * Math.exp(-hours / d.tau);
 }
 
+function freeHeat(d, t) {
+  if (d.Gday == null && d.Gnight == null) return d.G || 0;
+  const hour = d.hourOf(t);
+  return (hour >= DAY_FROM && hour < DAY_TO ? d.Gday : d.Gnight) || 0;
+}
+
 function simulate(d, state, t0, mins, on, outdoor, sun, visit) {
   let T = state.T;
   let X = state.X;
@@ -59,7 +67,7 @@ function simulate(d, state, t0, mins, on, outdoor, sun, visit) {
     const S = sun ? sun(t) || 0 : 0;
     const Xn = chargeStep(X, u, h, d);
     const Xmean = (X + Xn) / 2;
-    T += (d.H * Xmean - d.k * (T - out) + (d.sun || 0) * S) * h;
+    T += (d.H * Xmean - d.k * (T - out) + (d.sun || 0) * S + freeHeat(d, t)) * h;
     X = Xn;
     if (visit && visit(t + SIM_STEP, T, X) === false) break;
   }
@@ -175,9 +183,17 @@ function periodsOver(steps, slots) {
   return out;
 }
 
+function hourAt(steps, t) {
+  const i = Math.floor((t - steps.from) / STEP_SECONDS);
+  let offset = steps.offsets[0][1];
+  for (let k = 1; k < steps.offsets.length && steps.offsets[k][0] <= i; k++) offset = steps.offsets[k][1];
+  return new Date((t + offset * 60) * 1000).getUTCHours();
+}
+
 // Hours of heating by local day for one intelligent zone
 function simulateZone(zone, slots, steps, sun) {
-  const d = zone.dynamics;
+  // free heat follows the controller's clock, as the steps record it
+  const d = { ...zone.dynamics, hourOf: (t) => hourAt(steps, t) };
   const n = steps.outdoor.length;
   const at = (t) => Math.min(n - 1, Math.max(0, Math.round((t - steps.from) / STEP_SECONDS)));
   const outdoorAt = (t) => steps.outdoor[at(t)];

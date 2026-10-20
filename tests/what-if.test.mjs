@@ -12,9 +12,14 @@ const ok = (c, msg) => { console.log((c ? "PASS " : "FAIL ") + msg); if (!c) pro
 const now = priceCurrent(kit, currentSettings(kit));
 ok(Math.abs(now.total_pence - kit.expected_pence) <= 1, `matches the controller: ${now.total_pence.toFixed(1)}p vs ${kit.expected_pence}p`);
 
+// warmer always costs more; an earlier start needn't for an underfloor room
+// that would otherwise preheat into the midday sun and overshoot
 const warmer = currentSettings(kit);
-warmer[1].slots = warmer[1].slots.map((s) => ({ ...s, from: "07:00", temp: s.temp + 1 }));
-ok(priceCurrent(kit, warmer).zones[1] > now.zones[1], "an earlier, warmer Kitchen costs more");
+warmer[1].slots = warmer[1].slots.map((s) => ({ ...s, temp: s.temp + 1 }));
+ok(priceCurrent(kit, warmer).zones[1] > now.zones[1], "a warmer Kitchen costs more");
+const longer = currentSettings(kit);
+longer[2].slots = longer[2].slots.map((s) => (s.from == "06:30" ? { ...s, to: "12:00" } : s));
+ok(priceCurrent(kit, longer).zones[2] > now.zones[2], "keeping the first floor warm for longer costs more");
 
 const off = currentSettings(kit);
 off[2].enabled = false;
