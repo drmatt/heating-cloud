@@ -185,6 +185,19 @@ ok(lz.heater == "underfloor" && Number(lz.comfort_temp) == 20.5, "controller get
 r = await call("GET", "/rest/v1/zones?local_id=eq.1&select=plan", undefined, alice);
 ok(r.body[0].plan?.source == "rooms" && r.body[0].plan.slots.length == 1, "alice sees the controller's plan");
 
+// budget notices follow the plan: a new one replaces the old, and the controller can withdraw them
+const notify = (body) => call("POST", "/rest/v1/rpc/controller_notify", { p_kind: "budget_at_risk", p_title: "Heating adjusted", p_body: body, p_zone_local_ids: [] }, ctok);
+const showing = async () => (await call("GET", "/rest/v1/notifications?select=body&kind=like.budget*&dismissed_at=is.null", undefined, alice)).body.map((n) => n.body);
+await notify("Kitchen 4.5 °C cooler");
+await notify("Kitchen 1 °C cooler");
+ok(JSON.stringify(await showing()) == JSON.stringify(["Kitchen 1 °C cooler"]), "a new budget notice replaces the old one");
+r = await notify("Kitchen 1 °C cooler");
+ok(r.body === null && (await showing()).length == 1, "the same notice isn't sent twice");
+r = await call("POST", "/rest/v1/rpc/controller_withdraw_budget_notices", {}, alice);
+ok(r.status >= 400 && (await showing()).length == 1, "alice can't withdraw notices as the controller");
+r = await call("POST", "/rest/v1/rpc/controller_withdraw_budget_notices", {}, ctok);
+ok(r.body === 1 && (await showing()).length == 0, "the controller withdraws a notice the plan no longer needs");
+
 // what-if kit: written by the controller, read by members only
 r = await call("POST", "/rest/v1/what_if?on_conflict=home_id", { home_id: home, kit: { version: 1, made_at: "x" } }, ctok, "resolution=merge-duplicates,return=minimal");
 ok(r.status < 300, "controller uploads its what-if kit");
