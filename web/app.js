@@ -9,8 +9,8 @@
 //   #/settings         home, controller and account
 
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm";
-import { config } from "./config.js?v=2026101915";
-import { priceCurrent, priceTypicalMonth, currentSettings } from "./forecast.js?v=2026101915";
+import { config } from "./config.js?v=2026101916";
+import { priceCurrent, priceTypicalMonth, currentSettings } from "./forecast.js?v=2026101916";
 
 const app = document.getElementById("app");
 const topbar = document.getElementById("topbar");
