@@ -9,8 +9,8 @@
 //   #/settings         home, controller and account
 
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm";
-import { config } from "./config.js?v=2026101914";
-import { priceCurrent, priceTypicalMonth, currentSettings } from "./forecast.js?v=2026101914";
+import { config } from "./config.js?v=2026101915";
+import { priceCurrent, priceTypicalMonth, currentSettings } from "./forecast.js?v=2026101915";
 
 const app = document.getElementById("app");
 const topbar = document.getElementById("topbar");
@@ -1903,6 +1903,8 @@ function accuracyCard(a, zones) {
   if (s.room_peak_2h) lines.push(`Warmth after an early switch-off: within ${s.room_peak_2h.meanError} °C (${s.room_peak_2h.n} checks).`);
   if (s.outdoor_mean_day) lines.push(`Weather forecasts: within ${s.outdoor_mean_day.meanError} °C a day (${s.outdoor_mean_day.n} days).`);
   if (s.month_cost) lines.push(`Month-end forecasts: within ${(s.month_cost.meanError / 100).toFixed(2)} pounds (${s.month_cost.n} forecasts).`);
+  if (s.zone_hours_day_sim) lines.push(`Heating hours from running intelligent zones' controllers ahead: within ${s.zone_hours_day_sim.meanPercentError ?? "–"}% on average (${s.zone_hours_day_sim.n} zone-days). ` +
+    `A zone's forecast switches to this once it's within 20% over two weeks.`);
   const corrections = [];
   if (a.gasFactor && a.gasFactor != 1) corrections.push(`gas forecasts are scaled by ${a.gasFactor} to match your meter`);
   Object.entries(a.kScale || {}).forEach(([z, k]) => {
