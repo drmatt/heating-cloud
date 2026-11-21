@@ -9,8 +9,8 @@
 //   #/settings         home, controller and account
 
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm";
-import { config } from "./config.js?v=2026112101";
-import { priceCurrent, priceTypicalMonth, currentSettings } from "./forecast.js?v=2026112101";
+import { config } from "./config.js?v=2026112102";
+import { priceCurrent, priceTypicalMonth, currentSettings } from "./forecast.js?v=2026112102";
 
 const app = document.getElementById("app");
 const topbar = document.getElementById("topbar");
@@ -352,9 +352,10 @@ function todayTimes(zone, intelligent, scheduleSlots) {
 // The temperature an intelligent zone is warmed to when its rooms are in use
 const COMFORT_MIN = 16, COMFORT_MAX = 23;
 function comfortOf(zone, scheduleSlots) {
-  if (zone.comfort_temp != null) return Number(zone.comfort_temp);
-  const temps = (scheduleSlots || []).map((s) => Number(s.temp));
-  return temps.length ? Math.max(...temps) : 20;
+  if (zone.comfort_temp != null && Number.isFinite(Number(zone.comfort_temp))) return Number(zone.comfort_temp);
+  const temps = (scheduleSlots || []).map((s) => Number(s.temp)).filter((t) => Number.isFinite(t) && t > 5);
+  const t = temps.length ? Math.max(...temps) : 20;
+  return Math.min(COMFORT_MAX, Math.max(COMFORT_MIN, Math.round(t * 2) / 2));
 }
 
 // info: { hasSensor, rooms: [names], slots: this zone's schedule slots }
@@ -571,7 +572,7 @@ async function zonesPage() {
     supabase.from("sensors").select("zone_id").eq("home_id", home.id),
     loadBudget(),
     supabase.from("rooms").select("name, zone_id").eq("home_id", home.id).order("name"),
-    supabase.from("schedule_slots").select("zone_id, day, on_time, off_time").eq("home_id", home.id).order("on_time"),
+    supabase.from("schedule_slots").select("zone_id, day, on_time, off_time, temp").eq("home_id", home.id).order("on_time"),
   ]);
   if (error) return render(message("error", fail(error)));
   showOfflineBanner(controller);
