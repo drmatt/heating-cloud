@@ -312,3 +312,8 @@ ul.rooms li:first-child { border-top: none; }
   .budget-zone > .grow { flex-basis: 100% !important; }
   .budget-zone select { flex: 1 1 0 !important; max-width: none; }
 }
+
+.warm-set { align-items: center; gap: 8px; }
+.warm-set strong { font-size: 1.1rem; min-width: 64px; text-align: center; }
+.warm-set .step { width: 36px; height: 36px; padding: 0; font-size: 1.2rem; line-height: 1; }
+.big-select { max-width: 200px; font-size: 1.15rem; font-weight: 600; }

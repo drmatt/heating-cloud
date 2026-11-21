@@ -9,8 +9,8 @@
 //   #/settings         home, controller and account
 
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm";
-import { config } from "./config.js?v=2026101917";
-import { priceCurrent, priceTypicalMonth, currentSettings } from "./forecast.js?v=2026101917";
+import { config } from "./config.js?v=2026112101";
+import { priceCurrent, priceTypicalMonth, currentSettings } from "./forecast.js?v=2026112101";
 
 const app = document.getElementById("app");
 const topbar = document.getElementById("topbar");
@@ -349,6 +349,14 @@ function todayTimes(zone, intelligent, scheduleSlots) {
   return slots.map(([a, b]) => `${a}–${b == "24:00" ? "midnight" : b}`).join(", ");
 }
 
+// The temperature an intelligent zone is warmed to when its rooms are in use
+const COMFORT_MIN = 16, COMFORT_MAX = 23;
+function comfortOf(zone, scheduleSlots) {
+  if (zone.comfort_temp != null) return Number(zone.comfort_temp);
+  const temps = (scheduleSlots || []).map((s) => Number(s.temp));
+  return temps.length ? Math.max(...temps) : 20;
+}
+
 // info: { hasSensor, rooms: [names], slots: this zone's schedule slots }
 function zoneCard(zone, info) {
   const boosted = zone.boost_until && Date.parse(zone.boost_until) > Date.now();
@@ -360,7 +368,15 @@ function zoneCard(zone, info) {
   const lowered = Number(zone.budget_offset) > 0 ? ` <span class="pill">Budget −${Number(zone.budget_offset)}°</span>` : "";
   const nudged = zone.comfort_bump_until && Date.parse(zone.comfort_bump_until) > Date.now() && Number(zone.comfort_bump)
     ? ` <span class="pill">${Number(zone.comfort_bump) > 0 ? "Warmer" : "Cooler"} until ${fmtTime(zone.comfort_bump_until)}</span>` : "";
-  const target = zone.is_enabled && zone.desired_temp > 5 ? `<span class="muted small">Target ${fmtTemp(zone.desired_temp)}${lowered}${nudged}</span>` : "";
+  const target = zone.is_enabled && zone.desired_temp > 5 ? `<span class="muted small">Aiming for ${fmtTemp(zone.desired_temp)} now${lowered}${nudged}</span>` : "";
+  const comfort = comfortOf(zone, info.slots);
+  const setTemp = !info.hasSensor ? ""
+    : intelligent
+      ? `<div class="warm-set row"><span class="small">Warm at</span>
+          <button class="step" data-step="${zone.id}" data-by="-0.5" aria-label="Cooler">−</button>
+          <strong data-comfort="${zone.id}" data-value="${comfort}">${comfort.toFixed(1)} °C</strong>
+          <button class="step" data-step="${zone.id}" data-by="0.5" aria-label="Warmer">+</button></div>`
+      : `<a class="small" href="#/zone/${zone.id}">Set temperatures in its schedule</a>`;
   const plan = zone.is_enabled ? planLine(zone) : "";
   const times = zone.is_enabled ? todayTimes(zone, intelligent, info.slots) : "";
   const when = !zone.is_enabled ? "Switched off"
@@ -379,6 +395,7 @@ function zoneCard(zone, info) {
     </div>
     <div class="row">${modePill(zone, info.hasSensor)}${zone.heater && zone.heater != "unknown" ? `<span class="pill">${HEATERS[zone.heater]}</span>` : ""}</div>
     <div class="temp">${zone.current_temp == null ? `<small>${info.hasSensor ? "No reading" : "No sensor"}</small>` : fmtTemp(zone.current_temp)}</div>
+    ${setTemp}
     ${target}
     <div class="zone-facts small">
       <span>${esc(when)}</span>
@@ -580,12 +597,12 @@ async function zonesPage() {
     <h1>Zones</h1>
     ${boilerCard(zones, controller)}
     ${heaterQuestion(zones, zoneIdsWithSensors)}
-    ${budgetCard(money.budget, money.plan, true)}
     <div class="zones">${zones.map((z) => zoneCard(z, {
       hasSensor: zoneIdsWithSensors.has(z.id),
       rooms: (rooms || []).filter((r) => r.zone_id == z.id).map((r) => r.name),
       slots: (slots || []).filter((s) => s.zone_id == z.id),
     })).join("")}</div>
+    ${budgetCard(money.budget, money.plan, true)}
     ${energyCard(energySummary(daily || [], sensorZones))}`);
 
   bindHeaterSelects(zonesPage);
@@ -637,6 +654,26 @@ async function zonesPage() {
       zonesPage();
     };
   });
+
+  // Warm at: each press saves straight away; a pause in the refresh while choosing
+  let saving = null;
+  app.querySelectorAll("[data-step]").forEach((button) => {
+    button.onclick = () => {
+      clearInterval(refreshTimer);
+      const shown = app.querySelector(`[data-comfort="${button.dataset.step}"]`);
+      const value = Math.min(COMFORT_MAX, Math.max(COMFORT_MIN, Number(shown.dataset.value) + Number(button.dataset.by)));
+      shown.dataset.value = value;
+      shown.textContent = value.toFixed(1) + " °C";
+      clearTimeout(saving);
+      saving = setTimeout(async () => {
+        const { error } = await supabase.from("zones").update({ comfort_temp: value }).eq("id", button.dataset.step);
+        if (error) alert(fail(error));
+        every(15000, () => {
+          if (location.hash == "" || location.hash == "#/") zonesPage();
+        });
+      }, 600);
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -672,6 +709,7 @@ async function zonePage(zoneId) {
 
   render(`<p class="small"><a href="#/">← Zones</a></p>
     <h1>${esc(zone.name)}</h1>
+    ${roomBased ? warmSection(zone, slots) : ""}
     <section class="card">
       <h3>Last 24 hours</h3>
       ${ids.length ? `<div class="chart-wrap"><canvas id="chart" role="img" aria-label="Temperature in ${esc(zone.name)} over the last 24 hours, with times the heating was on"></canvas></div>`
@@ -683,7 +721,7 @@ async function zonePage(zoneId) {
       <h3>Heating time, last 30 days</h3>
       <div class="chart-wrap short"><canvas id="daily" role="img" aria-label="Hours of heating each day in ${esc(zone.name)} over the last 30 days"></canvas></div>
     </section>` : ""}
-    ${roomBased ? warmSection(zone, slots) : `<section class="card">
+    ${roomBased ? "" : `<section class="card">
       <h3>Schedule</h3>
       <p class="small muted">The heating comes on in these periods when the room is below the temperature you set.</p>
       <form id="schedule">
@@ -753,32 +791,37 @@ function hoursText(h) {
 function warmSection(zone, scheduleSlots) {
   const p = zone.plan || {};
   const slots = p.slots || [];
-  const temps = scheduleSlots.map((s) => Number(s.temp));
-  const comfort = zone.comfort_temp != null ? Number(zone.comfort_temp) : temps.length ? Math.max(...temps) : 20;
+  const comfort = comfortOf(zone, scheduleSlots);
   const options = [];
-  for (let t = 16; t <= 23; t += 0.5) options.push(t);
+  for (let t = COMFORT_MIN; t <= COMFORT_MAX; t += 0.5) options.push(t);
   const source = {
     rooms: "From when you use its rooms. Change them on the <a href=\"#/rooms\">Rooms</a> page.",
     minimum: `Its rooms are rarely used, so it's kept at its minimum (${fmtTemp(zone.min_temp)}). Add times on the <a href="#/rooms">Rooms</a> page for when you'll use them.`,
     schedule: "No room times yet, so it follows its old schedule. Tell us when its rooms are used on the <a href=\"#/rooms\">Rooms</a> page.",
   }[p.source] || "Waiting for the controller.";
   const next = planLine(zone);
+  const cut = Number(zone.budget_offset) > 0
+    ? `<p class="small">To stay within budget it's aiming ${Number(zone.budget_offset)} °C lower at the moment. Change this on the <a href="#/budget">Budget</a> page.</p>` : "";
   return `<section class="card">
+    <h3>Temperature</h3>
+    <label for="comfort-temp">Warm to this when the rooms are in use</label>
+    <select id="comfort-temp" class="big-select">${options
+      .map((t) => `<option value="${t}" ${t == comfort ? "selected" : ""}>${t.toFixed(1)} °C</option>`).join("")}</select>
+    <span class="small muted" id="comfort-saved"></span>
+    ${cut}
     <h3>When it's warm</h3>
     <p class="small">${source}</p>
     ${slots.length ? `<ul class="small">${describeWarm(slots)}</ul>` : ""}
     ${next ? `<p class="small">${esc(next)}.</p>` : ""}
-    <label for="comfort-temp">Temperature when the rooms are in use</label>
-    <select id="comfort-temp" style="max-width:200px">${options
-      .map((t) => `<option value="${t}" ${t == comfort ? "selected" : ""}>${t.toFixed(1)} °C</option>`).join("")}</select>
-    <p class="small muted">It aims to be within your comfort margin of this when each period starts, starting up to 6 hours early for slow heating.</p>
+    <p class="small muted">It aims to be within your comfort margin of the temperature when each period starts, starting up to 6 hours early for slow heating.</p>
   </section>`;
 }
 
 function bindWarm(zone) {
   document.getElementById("comfort-temp").onchange = async (e) => {
     const { error } = await supabase.from("zones").update({ comfort_temp: Number(e.target.value) }).eq("id", zone.id);
-    if (error) alert(fail(error));
+    if (error) return alert(fail(error));
+    document.getElementById("comfort-saved").textContent = "Saved";
   };
 }
 
