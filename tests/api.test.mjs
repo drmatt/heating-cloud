@@ -185,6 +185,15 @@ ok(lz.heater == "underfloor" && Number(lz.comfort_temp) == 20.5, "controller get
 r = await call("GET", "/rest/v1/zones?local_id=eq.1&select=plan", undefined, alice);
 ok(r.body[0].plan?.source == "rooms" && r.body[0].plan.slots.length == 1, "alice sees the controller's plan");
 
+// zone priority for the budget plan: set by members, passed to the controller
+r = await call("PATCH", "/rest/v1/zones?id=eq." + zones[0].id, { priority: "high" }, alice, "return=minimal");
+ok(r.status == 204, "alice marks a zone to keep warm first");
+r = await call("PATCH", "/rest/v1/zones?id=eq." + zones[0].id, { priority: "urgent" }, alice);
+ok(r.status >= 400, "only known priorities");
+r = await call("PATCH", "/rest/v1/zones?id=eq." + zones[0].id, { priority: "low" }, bob);
+r = await call("POST", "/rest/v1/rpc/controller_sync", { p_report: report2 }, ctok);
+ok(r.body.zones.find((z) => z.local_id == zones[0].local_id)?.priority == "high", "the controller gets the priority, and bob couldn't change it");
+
 // budget notices follow the plan: a new one replaces the old, and the controller can withdraw them
 const notify = (body) => call("POST", "/rest/v1/rpc/controller_notify", { p_kind: "budget_at_risk", p_title: "Heating adjusted", p_body: body, p_zone_local_ids: [] }, ctok);
 const showing = async () => (await call("GET", "/rest/v1/notifications?select=body&kind=like.budget*&dismissed_at=is.null", undefined, alice)).body.map((n) => n.body);

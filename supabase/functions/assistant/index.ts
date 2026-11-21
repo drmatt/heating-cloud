@@ -78,7 +78,7 @@ const proposeRooms: Anthropic.Tool = {
 };
 
 const GUIDE = `You are the assistant for a home heating controller sold to UK households. You help the owner keep warm within their monthly budget.
-How the system works: the house is split into heating zones (usually floors), each with a temperature sensor, a schedule and a target. A planner on the controller keeps the month within budget by switching on "intelligent heating" (learned control that decides when to start and stop the boiler, hours ahead for slow underfloor heating; when the owner switches it on for a zone, the zone is also warm when its rooms are used instead of following a fixed schedule), lowering targets in 0.5 °C steps (rarely used zones first, never below each zone's minimum temperature), and suggesting shorter heating periods or less hot water for the owner to approve. Rooms within a zone can only be controlled with their radiator valves (TRVs): about 1 = 12 °C, 2 = 15 °C, 3 = 18 °C, 4 = 21 °C, 5 = 24 °C, * = frost only.
+How the system works: the house is split into heating zones (usually floors), each with a temperature sensor, a schedule and a target. A planner on the controller keeps the month within budget by switching on "intelligent heating" (learned control that decides when to start and stop the boiler, hours ahead for slow underfloor heating; when the owner switches it on for a zone, the zone is also warm when its rooms are used instead of following a fixed schedule), lowering targets in 0.5 °C steps (zones the owner marked "cut first" and rarely used zones first, those marked "keep warm first" last, never below each zone's minimum temperature), and suggesting shorter heating periods or less hot water for the owner to approve. Rooms within a zone can only be controlled with their radiator valves (TRVs): about 1 = 12 °C, 2 = 15 °C, 3 = 18 °C, 4 = 21 °C, 5 = 24 °C, * = frost only.
 Money is in pounds and pence. Figures marked estimated come from boiler time rather than the gas meter. Be warm, brief and practical; use plain words, short paragraphs, no jargon, no markdown headings. Never invent numbers that aren't in the data. You can't change settings yourself; say what the owner can do on the dashboard.`;
 
 const MODE_GUIDE: Record<Mode, string> = {
@@ -91,7 +91,7 @@ async function homeContext(db: ReturnType<typeof createClient>, homeId: string) 
   const since = new Date(Date.now() - 45 * 86400000).toISOString().slice(0, 10);
   const [home, zones, slots, rooms, budget, plan, energy, status, daily] = await Promise.all([
     db.from("homes").select("name").eq("id", homeId).single(),
-    db.from("zones").select("id, local_id, name, is_enabled, eco_enabled, comfort_margin, min_temp, budget_offset, current_temp, desired_temp, model").eq("home_id", homeId).order("local_id"),
+    db.from("zones").select("id, local_id, name, is_enabled, eco_enabled, comfort_margin, min_temp, budget_offset, current_temp, desired_temp, model, priority").eq("home_id", homeId).order("local_id"),
     db.from("schedule_slots").select("zone_id, day, on_time, off_time, temp").eq("home_id", homeId),
     db.from("rooms").select("name, zone_id, kind, has_trv, usage, periods").eq("home_id", homeId),
     db.from("budgets").select("monthly_pence, start_day, boiler_kw").eq("home_id", homeId).maybeSingle(),
@@ -109,6 +109,7 @@ async function homeContext(db: ReturnType<typeof createClient>, homeId: string) 
       name: z.name,
       switched_on: z.is_enabled,
       intelligent: z.eco_enabled,
+      priority: z.priority,
       minimum_temp: z.min_temp,
       budget_lowered_by: z.budget_offset,
       current_temp: z.current_temp,

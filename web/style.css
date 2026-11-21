@@ -302,3 +302,13 @@ ul.rooms li:first-child { border-top: none; }
 @media (max-width: 560px) {
   .whatif-result { position: static; }
 }
+
+/* Budget settings: a row per zone */
+
+.budget-zone select { max-width: 170px; }
+.budget-zone-head span:not(.grow) { width: 170px; }
+@media (max-width: 560px) {
+  .budget-zone-head { display: none; }
+  .budget-zone > .grow { flex-basis: 100% !important; }
+  .budget-zone select { flex: 1 1 0 !important; max-width: none; }
+}

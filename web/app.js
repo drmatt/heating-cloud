@@ -9,8 +9,8 @@
 //   #/settings         home, controller and account
 
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm";
-import { config } from "./config.js?v=2026101916";
-import { priceCurrent, priceTypicalMonth, currentSettings } from "./forecast.js?v=2026101916";
+import { config } from "./config.js?v=2026101917";
+import { priceCurrent, priceTypicalMonth, currentSettings } from "./forecast.js?v=2026101917";
 
 const app = document.getElementById("app");
 const topbar = document.getElementById("topbar");
@@ -1397,6 +1397,8 @@ function comfortSection(zone, slots, roomBased) {
 // Budget
 
 const pounds = (pence) => "£" + (pence / 100).toFixed(2);
+// a zone's priority when the budget plan has to cool something
+const PRIORITIES = [["high", "Keep warm first"], ["normal", "Normal"], ["low", "Cut first"]];
 const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 function budgetStatus(plan) {
@@ -1424,7 +1426,7 @@ function budgetCard(budget, plan, compact) {
     <p><strong>${pounds(spent)}</strong> spent of <strong>${pounds(budget.monthly_pence)}</strong>${forecast != null ? `, heading for about <strong>${pounds(forecast)}</strong>` : ""}.
       ${plan?.estimated ? `<span class="small muted">Partly estimated from boiler time.</span>` : ""}</p>
     ${message(status.kind, status.text)}
-    ${!compact && forecast != null ? `<button id="try-changes" type="button">Try your own changes</button>` : ""}
+    ${!compact && forecast != null ? `<a class="button" href="#/whatif">Try your own changes</a>` : ""}
   </section>`;
 }
 
@@ -1553,7 +1555,7 @@ function whatIfMonths(kit) {
 
 async function whatIfCard(box, kit, budget, zones, rooms) {
   if (!kit) {
-    box.innerHTML = `<h3>What if…</h3><p class="muted small">This appears once your controller has sent its first forecast, within the hour.</p>`;
+    box.innerHTML = `<p class="muted small">This appears once your controller has sent its first forecast, within the hour.</p>`;
     return;
   }
   const kz = kit.zones.filter((z) => z.slots.length || z.enabled);
@@ -1581,8 +1583,7 @@ async function whatIfCard(box, kit, budget, zones, rooms) {
     console.warn("What-if pricing differs from the controller's:", check.total_pence, kit.expected_pence);
   }
 
-  box.innerHTML = `<h3>What if…</h3>
-    <p class="small muted">Try other temperatures and warm times and see what the month would cost. It prices your settings as you set them, before the budget plan's automatic cuts.</p>
+  box.innerHTML = `<p class="small muted">It prices your settings as you set them, before the budget plan's automatic cuts.</p>
     <label for="whatif-month">Month</label>
     <select id="whatif-month" style="max-width:340px">${whatIfMonths(kit)}</select>
     <div id="whatif-result" class="whatif-result" aria-live="polite"></div>
@@ -1714,18 +1715,34 @@ async function whatIfCard(box, kit, budget, zones, rooms) {
   draw();
 }
 
-async function budgetPage() {
-  setNav("budget");
+// What if: its own page, so it isn't mistaken for the plan or the settings
+async function whatIfPage() {
+  setNav("whatif");
   clearInterval(refreshTimer);
-  const [{ budget, plan }, { data: zones }, { data: status }, controller, { data: acc }, { data: whatIf }, { data: rooms }] = await Promise.all([
+  const [{ budget }, { data: zones }, { data: whatIf }, { data: rooms }] = await Promise.all([
     loadBudget(),
-    supabase.from("zones").select("id, local_id, name, min_temp, budget_offset").eq("home_id", home.id).order("local_id"),
-    supabase.from("energy_status").select("*").eq("home_id", home.id).maybeSingle(),
-    loadController(),
-    supabase.from("model_accuracy").select("summary").eq("home_id", home.id).maybeSingle(),
+    supabase.from("zones").select("id, local_id, name").eq("home_id", home.id).order("local_id"),
     supabase.from("what_if").select("kit").eq("home_id", home.id).maybeSingle(),
     supabase.from("rooms").select("id, name, zone_id").eq("home_id", home.id).order("name"),
   ]);
+  render(`<h1>What if…</h1>
+    <p class="muted">Try other temperatures and warm times, or switch zones on and off, and see what a month would cost. Nothing changes until you choose "Use these settings".</p>
+    <section class="card" id="what-if"></section>`);
+  whatIfCard(document.getElementById("what-if"), whatIf?.kit || null, budget, zones || [], rooms || []);
+}
+
+async function budgetPage() {
+  setNav("budget");
+  clearInterval(refreshTimer);
+  const [{ budget, plan }, { data: zones }, { data: status }, controller, { data: acc }, { data: sensorRows }] = await Promise.all([
+    loadBudget(),
+    supabase.from("zones").select("id, local_id, name, min_temp, budget_offset, priority").eq("home_id", home.id).order("local_id"),
+    supabase.from("energy_status").select("*").eq("home_id", home.id).maybeSingle(),
+    loadController(),
+    supabase.from("model_accuracy").select("summary").eq("home_id", home.id).maybeSingle(),
+    supabase.from("sensors").select("zone_id").eq("home_id", home.id),
+  ]);
+  const heated = new Set((sensorRows || []).map((x) => x.zone_id)); // zones the plan can cool (not hot water)
   showOfflineBanner(controller);
   const periodStart = plan?.period_start;
   const { data: daily } = periodStart
@@ -1764,7 +1781,6 @@ async function budgetPage() {
           <button class="primary" data-apply="${esc(s.key)}">Apply</button><button data-decline="${esc(s.key)}">Not now</button></div>`).join("")}` : ""}
       ${plan.trv_advice.length ? `<p class="small muted">Radiator valves:</p><ul>${plan.trv_advice.map((t) => `<li>${esc(t.text)}</li>`).join("")}</ul>` : ""}
     </section>` : ""}
-    <section class="card" id="what-if"></section>
     ${daily.length ? `<section class="card"><h3>Daily cost this month</h3>
       <div class="chart-wrap short"><canvas id="costs" role="img" aria-label="Gas cost each day this billing month"></canvas></div>
       <p class="small muted">Striped bars are estimated from boiler time; solid bars are from your meter.</p></section>` : ""}
@@ -1783,9 +1799,12 @@ async function budgetPage() {
         </div>
         <label class="switch"><input type="checkbox" name="other" ${budget?.other_gas === false ? "" : "checked"}> We also use gas for cooking or other appliances (such as a gas fire)</label>
         <p class="small muted">Untick if gas is only used for heating and hot water, so all of it is put down to those.</p>
-        <p class="small muted">The lowest each zone may go to stay within budget:</p>
-        ${zones.map((z) => `<div class="row"><span class="grow">${esc(z.name)}</span>
-          <select data-min="${z.id}" aria-label="Minimum for ${esc(z.name)}">${[5, 10, 12, 14, 15, 16, 17, 18, 19, 20].map((t) =>
+        <p class="small muted">When the plan has to cool something, it starts with the zones that matter least, and never takes a zone below its lowest temperature.</p>
+        <div class="row small muted budget-zone-head"><span class="grow"></span><span>Priority</span><span>Lowest</span></div>
+        ${zones.filter((z) => heated.has(z.id)).map((z) => `<div class="row budget-zone"><span class="grow">${esc(z.name)}</span>
+          <select data-priority="${z.id}" aria-label="Priority for ${esc(z.name)}">${PRIORITIES.map(([v, label]) =>
+            `<option value="${v}" ${(z.priority || "normal") == v ? "selected" : ""}>${label}</option>`).join("")}</select>
+          <select data-min="${z.id}" aria-label="Lowest temperature for ${esc(z.name)}">${[5, 10, 12, 14, 15, 16, 17, 18, 19, 20].map((t) =>
             `<option value="${t}" ${Number(z.min_temp) == t ? "selected" : ""}>${t == 5 ? "Frost only" : t + " °C"}</option>`).join("")}</select></div>`).join("")}
         <div class="out"></div>
         <button class="primary" type="submit">Save</button>
@@ -1811,8 +1830,7 @@ async function budgetPage() {
 
   if (daily.length) drawCosts(daily);
   bindChat("ask", "ask");
-  whatIfCard(document.getElementById("what-if"), whatIf?.kit || null, budget, zones, rooms || []);
-  document.getElementById("try-changes")?.addEventListener("click", () => document.getElementById("what-if").scrollIntoView({ behavior: "smooth" }));
+
 
   document.getElementById("explain")?.addEventListener("click", async (e) => {
     const out = document.getElementById("explanation");
@@ -1869,7 +1887,8 @@ async function budgetPage() {
       const { error } = await supabase.from("budgets").upsert(fields);
       if (error) throw error;
       for (const sel of form.querySelectorAll("[data-min]")) {
-        const { error: e2 } = await supabase.from("zones").update({ min_temp: Number(sel.value) }).eq("id", sel.dataset.min);
+        const priority = form.querySelector(`[data-priority="${sel.dataset.min}"]`)?.value || "normal";
+        const { error: e2 } = await supabase.from("zones").update({ min_temp: Number(sel.value), priority }).eq("id", sel.dataset.min);
         if (e2) throw e2;
       }
       out.innerHTML = message("success", "Saved. Your controller makes a new plan within the hour.");
@@ -2344,6 +2363,7 @@ async function route_() {
     if (hash == "#/sensors") return await sensorsPage();
     if (hash == "#/budget") return await budgetPage();
     if (hash == "#/costs") return await costsPage();
+    if (hash == "#/whatif") return await whatIfPage();
     if (hash == "#/rooms" || hash == "#/home") return await roomsPage();
     if (hash == "#/settings") return await settingsPage();
     return await zonesPage();
