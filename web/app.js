@@ -9,8 +9,8 @@
 //   #/settings         home, controller and account
 
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm";
-import { config } from "./config.js?v=2026112102";
-import { priceCurrent, priceTypicalMonth, currentSettings } from "./forecast.js?v=2026112102";
+import { config } from "./config.js?v=2026112103";
+import { priceCurrent, priceTypicalMonth, currentSettings } from "./forecast.js?v=2026112103";
 
 const app = document.getElementById("app");
 const topbar = document.getElementById("topbar");
@@ -373,7 +373,7 @@ function zoneCard(zone, info) {
   const comfort = comfortOf(zone, info.slots);
   const setTemp = !info.hasSensor ? ""
     : intelligent
-      ? `<div class="warm-set row"><span class="small">Warm at</span>
+      ? `<div class="warm-set row"><span class="small">When in use</span>
           <button class="step" data-step="${zone.id}" data-by="-0.5" aria-label="Cooler">−</button>
           <strong data-comfort="${zone.id}" data-value="${comfort}">${comfort.toFixed(1)} °C</strong>
           <button class="step" data-step="${zone.id}" data-by="0.5" aria-label="Warmer">+</button></div>`
@@ -656,7 +656,7 @@ async function zonesPage() {
     };
   });
 
-  // Warm at: each press saves straight away; a pause in the refresh while choosing
+  // When in use: each press saves straight away; a pause in the refresh while choosing
   let saving = null;
   app.querySelectorAll("[data-step]").forEach((button) => {
     button.onclick = () => {
